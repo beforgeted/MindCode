@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codeagent"
+version = "0.1.0"
+description = "MindCode CodeAgent — Context / Evidence / Memory / Multi-Agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+]
+
+[project.scripts]
+codeagent = "codeagent.cli.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["codeagent"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+# RUF001-003：中文注释/文档字符串里的全角标点会被判为"歧义 unicode"，
+# 这个项目的注释就是中文，属于误报。
+ignore = ["B008", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["codeagent", "tests"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+include = ["codeagent", "tests"]
