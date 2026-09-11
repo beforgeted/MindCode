@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import pytest
 
+from codeagent.context.compact.base import CompactionResult
+from codeagent.context.compact.models import TaskCheckpoint
 from codeagent.context.history.conversation_history import ConversationHistory
 from codeagent.context.manager import ContextManager, ContextOverflowError
 from codeagent.context.profile import ContextProfile
@@ -138,3 +140,76 @@ async def test_prediction_triggers_before_current_exceeds_soft():
     assert result.prediction.current_tokens < result.prediction.soft_trigger
     assert result.prediction.should_compact
     assert "下一轮风险" in result.prediction.reason
+
+
+class SuccessfulCompactor:
+    async def compact(
+        self,
+        messages,
+        *,
+        profile,
+        focus=None,
+        checkpoint=None,
+        turn_statuses=None,
+    ):
+        next_checkpoint = TaskCheckpoint(goal="keep working")
+        assert turn_statuses is not None
+        recent_turn_id = list(turn_statuses)[-1]
+        candidate = tuple(
+            [message for message in messages if message.role is Role.SYSTEM]
+            + [next_checkpoint.to_message()]
+            + [message for message in messages if message.turn_id == recent_turn_id]
+        )
+        return CompactionResult(
+            compacted=True,
+            messages=candidate,
+            checkpoint=next_checkpoint,
+            tokens_before=1_000,
+            tokens_after=100,
+        )
+
+
+async def test_context_manager_atomically_commits_checkpoint(profile: ContextProfile):
+    history = _history()
+    history.append(Message.system("system"))
+    _turn(history, tool_output="old")
+    _turn(history, tool_output="recent")
+    manager = ContextManager(compactor=SuccessfulCompactor())
+
+    result = await manager.prepare(history, profile, force_compact=True)
+
+    assert result.compacted
+    assert result.compaction is not None
+    assert history.checkpoint is result.compaction.checkpoint
+    assert history.compaction_count == 1
+    assert ContextCategory.CHECKPOINT in result.breakdown
+    assert history.messages == result.messages
+
+
+class InvalidCandidateCompactor(SuccessfulCompactor):
+    async def compact(self, messages, **kwargs):
+        checkpoint = TaskCheckpoint(goal="invalid")
+        return CompactionResult(
+            compacted=True,
+            messages=(checkpoint.to_message(), Message.user("x" * 100_000)),
+            checkpoint=checkpoint,
+            tokens_before=100,
+            tokens_after=100_000,
+        )
+
+
+async def test_context_manager_rejects_candidate_over_hard_limit():
+    profile = replace(ContextProfile(), context_window=2_000)
+    history = _history()
+    _turn(history, tool_output="small")
+    source = history.messages
+    manager = ContextManager(compactor=InvalidCandidateCompactor())
+
+    result = await manager.prepare(history, profile, force_compact=True)
+
+    assert not result.compacted
+    assert result.compaction is not None
+    assert "未提交" in result.compaction.reason
+    assert history.messages == source
+    assert history.checkpoint is None
+    assert history.compaction_count == 0

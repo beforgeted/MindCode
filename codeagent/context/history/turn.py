@@ -12,7 +12,7 @@ Turn 为协议边界。上下文文档把 Turn 模型排到最后一期，但它
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -40,7 +40,12 @@ class ConversationTurn:
 
 
 class TurnPartitioner(Protocol):
-    def partition(self, messages: Sequence[Message]) -> list[ConversationTurn]: ...
+    def partition(
+        self,
+        messages: Sequence[Message],
+        *,
+        statuses: Mapping[str, TurnStatus] | None = None,
+    ) -> list[ConversationTurn]: ...
 
 
 class TurnIdPartitioner:
@@ -49,9 +54,15 @@ class TurnIdPartitioner:
     system 消息永不进入任何 turn —— 这就是"System Prompt 不压"的落地方式。
     """
 
-    def partition(self, messages: Sequence[Message]) -> list[ConversationTurn]:
+    def partition(
+        self,
+        messages: Sequence[Message],
+        *,
+        statuses: Mapping[str, TurnStatus] | None = None,
+    ) -> list[ConversationTurn]:
         turns: list[ConversationTurn] = []
         index: dict[str, ConversationTurn] = {}
+        known_statuses = statuses or {}
         implicit = 0
         for message in messages:
             if message.role is Role.SYSTEM:
@@ -66,7 +77,10 @@ class TurnIdPartitioner:
                     turn_id = turns[-1].turn_id
             turn = index.get(turn_id)
             if turn is None:
-                turn = ConversationTurn(turn_id=turn_id)
+                turn = ConversationTurn(
+                    turn_id=turn_id,
+                    status=known_statuses.get(turn_id, TurnStatus.RUNNING),
+                )
                 index[turn_id] = turn
                 turns.append(turn)
             turn.messages.append(message)

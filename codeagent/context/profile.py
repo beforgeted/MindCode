@@ -29,9 +29,16 @@ class ContextProfile:
     # 压缩参数（P2）
     retain_recent_turns: int = 3
     map_chunk_tokens: int = 20_000
+    map_max_output_tokens: int = 4_000
+    reduce_max_output_tokens: int = 8_000
+    checkpoint_max_tokens: int = 12_000
+    compaction_map_concurrency: int = 3
 
     # Memory 注入预算（P3）
     max_memory_injection_tokens: int = 8_000
+    memory_search_limit: int = 50
+    memory_selected_limit: int = 20
+    memory_retrieval_timeout_seconds: float = 0.5
 
     # Tool 结果治理（P1）
     # tool 边界硬上限：超过这个数一律 offload 到 artifact

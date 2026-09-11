@@ -14,19 +14,25 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from codeagent.context.profile import ContextProfile
 from codeagent.llm.message import Message
+
+if TYPE_CHECKING:
+    from codeagent.context.compact.models import TaskCheckpoint
+    from codeagent.context.history.turn import TurnStatus
 
 
 @dataclass(frozen=True, slots=True)
 class CompactionResult:
     compacted: bool
     messages: tuple[Message, ...]
+    checkpoint: TaskCheckpoint | None = None
     tokens_before: int = 0
     tokens_after: int = 0
     map_chunks: int = 0
+    map_failures: int = 0
     reason: str = ""
 
     @property
@@ -42,6 +48,8 @@ class HistoryCompactor(Protocol):
         *,
         profile: ContextProfile,
         focus: str | None = None,
+        checkpoint: TaskCheckpoint | None = None,
+        turn_statuses: dict[str, TurnStatus] | None = None,
     ) -> CompactionResult: ...
 
 
@@ -54,6 +62,8 @@ class NullCompactor:
         *,
         profile: ContextProfile,
         focus: str | None = None,
+        checkpoint: TaskCheckpoint | None = None,
+        turn_statuses: dict[str, TurnStatus] | None = None,
     ) -> CompactionResult:
         return CompactionResult(
             compacted=False,

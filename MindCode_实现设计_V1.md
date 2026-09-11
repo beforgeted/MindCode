@@ -173,17 +173,23 @@ Checkpoint 里。
 
 ### P3 本地 Durable Memory 最小闭环
 
-对齐记忆 V2 §49 的 MVP：SQLite store、Scope/Type/Source/Status、
-`EvidenceRef`、关键词检索、`/memory list|show|delete`、`MEMORY.md` 人可读索引、
-Session End 的候选抽取（**只做规则预过滤，不上 LLM Judge**）。
+当前实现裁决：PROJECT scope SQLite store、Scope/Type/Source/Status、`EvidenceRef`、
+FTS5 trigram + 两字 LIKE 回退、`/memory add|list|search|show|delete`、
+`MEMORY.md` 人审投影，以及 request-local 的有界 Memory 注入。
 
-**中文检索的坑**：Memory 正文是中文，FTS5 默认的 unicode61 分词器会把一整串
-汉字当成一个 token，`match '并发'` 命中不了。建表时用 `tokenize='trigram'`
-（SQLite 3.34+），但 trigram 要求查询串 ≥3 字符，两字词还需要 LIKE 回退。
-**这个要在建表时就定，之后改要重建索引。**
+- SQLite 使用标准库 `sqlite3 + asyncio.to_thread`，开启 WAL；不在 event loop 直接 I/O。
+- 只有用户显式 `/memory add` 会写入，固定 PROJECT / USER_EXPLICIT / ACTIVE。
+- SQLite 是唯一真源；`MEMORY.md` 更新失败不回滚 DB，下次按 revision 重建。
+- Memory projection 只存在于一次 prepared request，不写回 ConversationHistory。
+- Claude `memory_20250818` 是 provider tool contract，P3 不接入，保持 repository 中立。
+- Session End candidate extraction 延至 P4，与 Judge/dedup/conflict/sensitive filter 同期，
+  避免在治理能力缺失时自动升级长期知识。
 
-**退出标准**：记忆 V2 §47.1（Compact 不影响 Durable Memory）和 §47.2
-（Compact 后能顺 EvidenceRef 回溯原始 tool result）通过。
+**中文检索约束**：FTS5 使用 `tokenize='trigram'`；三字以上走 FTS，两字及更短
+走转义后的参数化 LIKE。Tokenizer 选择后变更需要重建索引。
+
+**退出标准**：Compact、`/clear` 和关闭重开 Session 均不影响 Durable Memory；
+Memory 的 `EvidenceRef` 可回溯事件或 artifact；检索失败降级继续对话；注入不进入 History。
 
 ### P4 Memory 写入治理 + 检索质量
 

@@ -75,6 +75,15 @@ def render_context_report(
         add(f"  map chunks    {c.map_chunks}")
         add(f"  说明          {c.reason}")
 
+    if prepared.memory_budget or prepared.memory_degraded_reason:
+        add("")
+        add("Durable Memory")
+        add(f"  预算          {prepared.memory_budget:,} tokens")
+        add(f"  候选 / 选中   {prepared.memory_candidates} / {prepared.memory_selected}")
+        add(f"  注入          {prepared.memory_tokens:,} tokens")
+        if prepared.memory_degraded_reason:
+            add(f"  降级          {prepared.memory_degraded_reason}")
+
     add("")
     add(f"消息条数 {message_count}   累计 compact {compaction_count} 次")
 

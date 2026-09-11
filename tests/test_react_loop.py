@@ -6,6 +6,7 @@ from codeagent.agent.models import RunStatus
 from codeagent.context.history.conversation_history import validate_tool_protocol
 from codeagent.evidence.models import EventType
 from codeagent.llm.stub_client import StubLlmClient
+from codeagent.memory.models import MemoryType
 from codeagent.session import AgentSession
 
 
@@ -110,3 +111,20 @@ async def test_clear_starts_new_context_but_keeps_events(config, workspace):
 
     # Clear Context != Forget Evidence
     assert len([e for e in events if e.type == EventType.AGENT_RUN_STARTED]) == 2
+
+
+async def test_memory_survives_clear_and_session_reopen(config, workspace):
+    memory_id: str
+    async with AgentSession(config, llm_client=StubLlmClient([])) as session:
+        item, _ = await session.memory_service.add(
+            "项目固定使用 Python 3.11",
+            MemoryType.CONSTRAINT,
+        )
+        memory_id = item.id
+        session.clear()
+        assert (await session.memory_service.show(memory_id)) is not None
+
+    async with AgentSession(config, llm_client=StubLlmClient([])) as reopened:
+        restored = await reopened.memory_service.show(memory_id)
+        assert restored is not None
+        assert restored.content == "项目固定使用 Python 3.11"

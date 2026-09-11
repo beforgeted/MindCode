@@ -13,14 +13,15 @@ import sys
 from pathlib import Path
 
 from codeagent.agent.models import RunStatus
+from codeagent.cli.memory import handle_memory_command
 from codeagent.cli.report import render_context_report
 from codeagent.config import AppConfig
 from codeagent.context.manager import ContextOverflowError
 from codeagent.llm.stub_client import StubLlmClient
 from codeagent.session import AgentSession
 
-BANNER = """MindCode CodeAgent (P0+P1 骨架)
-命令: /context  /compact  /memory  /clear  /metrics  /quit
+BANNER = """MindCode CodeAgent (P0-P3 单 Agent)
+命令: /context  /compact  /memory add|list|search|show|delete  /clear  /metrics  /quit
 """
 
 
@@ -69,7 +70,7 @@ async def _handle_command(session: AgentSession, line: str) -> bool:
         session.clear()
         print("[已开新 Session Context。Raw Events 与 Durable Memory 不受影响]")
     elif command == "/memory":
-        print("[P3 未实现：Durable Memory 尚未接入]")
+        print(await handle_memory_command(session.memory_service, rest))
     elif command == "/metrics":
         snapshot = session.metrics.snapshot()
         for group, values in snapshot.items():
@@ -87,7 +88,8 @@ async def run_repl(config: AppConfig) -> int:
     client = _build_client(config)
     print(BANNER)
     print(f"workspace: {config.workspace_root}")
-    print(f"home:      {config.home}\n")
+    print(f"project:   {config.effective_project_id}")
+    print(f"home:      {config.state_root}\n")
 
     async with AgentSession(config, llm_client=client) as session:
         while True:

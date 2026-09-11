@@ -3,7 +3,8 @@
 Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落地方案与分期见
 [`MindCode_实现设计_V1.md`](MindCode_实现设计_V1.md)。
 
-当前落地范围：**P0（地基）+ P1（Evidence 平面 + Tool 结果治理 + ContextManager 外壳）**。
+当前落地范围：**P0–P3 单 Agent**。P4 的自动记忆治理、P5 Multi-Agent 和
+P6 恢复能力仍未实现。
 
 ## 快速开始
 
@@ -19,7 +20,21 @@ export ANTHROPIC_API_KEY=sk-ant-...
 python -m codeagent.cli.app --workspace /path/to/repo
 ```
 
-REPL 命令：`/context` `/compact` `/memory` `/clear` `/metrics` `/quit`。
+REPL 命令：`/context` `/compact` `/memory add|list|search|show|delete` `/clear`
+`/metrics` `/quit`。
+
+Memory 示例：
+
+```text
+/memory add --type constraint --tag runtime "项目固定使用 Python 3.11"
+/memory search Python
+/memory list
+/memory show mem_xxx
+/memory delete mem_xxx
+```
+
+Memory 以本地明文保存在项目 `memory.db` 中，`memory/MEMORY.md` 只是可重建的
+人审投影。P3 不会从 Session 自动写 Memory，也不提供自动敏感信息检测。
 
 ```bash
 pytest              # 全部测试
@@ -42,18 +57,21 @@ pyright             # 类型
 | tool 边界有界化 | `tool/normalizer.py` |
 | tool 并发 + 协议完整性保证 | `tool/execution_manager.py` |
 | ReAct 主循环 | `runtime/react_engine.py` |
+| P2 turn-atomic Map/Reduce + TaskCheckpoint | `context/compact/` |
+| PROJECT SQLite Durable Memory + FTS/LIKE | `memory/sqlite_store.py` |
+| Request-local Memory 检索与有界注入 | `memory/retriever.py`、`context/manager.py` |
+| `/memory` 显式管理与 MEMORY.md 投影 | `cli/memory.py`、`memory/index_projector.py` |
 | 内置工具 | `tool/builtin/` |
 
 ## 未实现（按分期）
 
-- **P2** HistoryCompactor / TaskCheckpoint / Turn 状态机 — 挂载点在 `context/compact/base.py`
-- **P3** SQLite Durable Memory / `/memory`
-- **P4** Memory 写入治理 + 混合检索
+- **P3 验证缺口**：真实模型 benchmark、长期抗漂移、CLI 人工验收
+- **P4** 自动候选 / LLM Judge / dedup / conflict / sensitive filter / hybrid retrieval
 - **P5** Multi-Agent 并行 + Workspace 隔离
 - **P6** 资源锁清理 / Run 持久化 / 共享 Memory
 
-P1 没有 Compactor，所以上下文越过 hard limit 时会抛 `ContextOverflowError`
-而不是静默截断历史 —— 这是刻意的，见 `context/manager.py` 的注释。
+P2/P3 都采用保守失败：压缩失败不替换 History，Memory 检索失败不阻断对话，
+最终越过 hard limit 才抛 `ContextOverflowError`，绝不静默截断历史。
 
 ## 安全说明
 

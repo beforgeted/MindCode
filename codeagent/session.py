@@ -1,22 +1,7 @@
-"""装配层：把 P0/P1 的所有组件接成一个可用的单 Agent 会话。
+"""单 Agent 会话的 composition root。
 
-依赖方向自上而下，没有循环：
-
-    AgentSession
-      ├── JsonlEventStore / FileArtifactStore      (evidence)
-      ├── ContextManager                           (context)
-      │     ├── HeuristicTokenEstimator
-      │     ├── ContextBudgetPredictor
-      │     ├── ImagePayloadPruner
-      │     ├── ToolResultOffloader
-      │     └── NullCompactor                      <- P2 换成真 Compactor
-      ├── ToolExecutionManager                     (tool)
-      │     ├── ToolRegistry + builtin tools
-      │     └── ToolResultNormalizer
-      └── ReActEngine                              (runtime)
-
-换 P2 只需要把 NullCompactor 换掉；接 P3 只需要给 ContextManager 加
-MemoryRetriever。ReActEngine 和 AgentSession 都不用改。
+P0-P3 的 Evidence、工具治理、History Compaction 与 PROJECT Durable Memory
+都在这里装配；ReActEngine 只消费 ContextManager.prepare()，不感知这些策略。
 """
 
 from __future__ import annotations
@@ -27,6 +12,7 @@ from codeagent.agent.models import AgentDefinition, AgentRunResult
 from codeagent.agent.run import AgentRun
 from codeagent.config import DEFAULT_SYSTEM_PROMPT, AppConfig
 from codeagent.context.compact.base import HistoryCompactor
+from codeagent.context.compact.history_compactor import ConversationHistoryCompactor
 from codeagent.context.manager import ContextManager, ContextPreparationResult
 from codeagent.context.token_estimator import HeuristicTokenEstimator
 from codeagent.evidence.artifact_store import FileArtifactStore
@@ -35,6 +21,10 @@ from codeagent.infra.ids import new_session_id
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
 from codeagent.llm.types import ModelConfig
+from codeagent.memory.index_projector import MemoryIndexProjector
+from codeagent.memory.retriever import KeywordMemoryRetriever
+from codeagent.memory.service import MemoryService
+from codeagent.memory.sqlite_store import SqliteMemoryStore
 from codeagent.runtime.react_engine import ReActEngine
 from codeagent.tool.builtin import default_tools
 from codeagent.tool.execution_manager import ToolExecutionManager
@@ -57,16 +47,49 @@ class AgentSession:
         self.session_id = session_id or new_session_id()
         self.metrics = Metrics()
 
-        self.event_store = JsonlEventStore(config.home)
-        self.artifact_store = FileArtifactStore(config.home)
+        self.event_store = JsonlEventStore(config.state_root)
+        self.artifact_store = FileArtifactStore(config.state_root)
+        self.memory_store = SqliteMemoryStore(config.state_root / "memory.db")
+        self.memory_service = MemoryService(
+            self.memory_store,
+            MemoryIndexProjector(
+                config.state_root,
+                self.memory_store,
+                config.effective_project_id,
+            ),
+            self.event_store,
+            project_id=config.effective_project_id,
+            session_id=self.session_id,
+        )
+        self.memory_retriever = KeywordMemoryRetriever(
+            self.memory_store,
+            config.effective_project_id,
+        )
         self.estimator = HeuristicTokenEstimator()
+        self.registry = ToolRegistry(default_tools())
+        self.definition = definition or AgentDefinition(
+            id="mindcode",
+            name="MindCode",
+            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            model_config=ModelConfig(
+                model=config.model, context_window=config.profile.context_window
+            ),
+            allowed_tools=self.registry.names(),
+            context_profile=config.profile,
+        )
+        active_compactor = compactor or ConversationHistoryCompactor(
+            llm_client,
+            self.estimator,
+            self.definition.model_config,
+            metrics=self.metrics,
+        )
 
         self.context_manager = ContextManager(
             estimator=self.estimator,
-            compactor=compactor,
+            compactor=active_compactor,
+            memory_retriever=self.memory_retriever,
             metrics=self.metrics,
         )
-        self.registry = ToolRegistry(default_tools())
         self.execution_manager = ToolExecutionManager(
             registry=self.registry,
             normalizer=ToolResultNormalizer(
@@ -88,16 +111,6 @@ class AgentSession:
             metrics=self.metrics,
         )
 
-        self.definition = definition or AgentDefinition(
-            id="mindcode",
-            name="MindCode",
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
-            model_config=ModelConfig(
-                model=config.model, context_window=config.profile.context_window
-            ),
-            allowed_tools=self.registry.names(),
-            context_profile=config.profile,
-        )
         self.run = self._new_run()
 
     def _new_run(self) -> AgentRun:
@@ -110,6 +123,13 @@ class AgentSession:
 
     async def __aenter__(self) -> AgentSession:
         await self.event_store.start()
+        startup = await self.memory_service.start()
+        if not self.memory_service.available:
+            from codeagent.memory.retriever import NullMemoryRetriever
+
+            self.context_manager.memory_retriever = NullMemoryRetriever()
+        if startup.warning:
+            self.metrics.incr("memory.index.warnings")
         return self
 
     async def __aexit__(
@@ -121,6 +141,8 @@ class AgentSession:
         await self.aclose()
 
     async def aclose(self) -> None:
+        if self.memory_service.available:
+            await self.memory_service.aclose()
         await self.event_store.aclose()
 
     async def send(self, user_input: str) -> AgentRunResult:
