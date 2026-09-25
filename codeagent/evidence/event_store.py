@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
+from codeagent.evidence.cursor import EventBatch, EventCursor
 from codeagent.evidence.models import AgentEvent, EventType
 
 
@@ -26,6 +27,16 @@ class RawEventStore(Protocol):
         limit: int | None = None,
     ) -> list[AgentEvent]: ...
 
+    async def query_after(
+        self,
+        session_id: str,
+        cursor: EventCursor,
+        *,
+        limit: int = 200,
+    ) -> EventBatch: ...
+
+    async def list_session_ids(self) -> list[str]: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -45,6 +56,18 @@ class NullEventStore:
         types: Sequence[EventType] | None = None,
         limit: int | None = None,
     ) -> list[AgentEvent]:
+        return []
+
+    async def query_after(
+        self,
+        session_id: str,
+        cursor: EventCursor,
+        *,
+        limit: int = 200,
+    ) -> EventBatch:
+        return EventBatch((), cursor)
+
+    async def list_session_ids(self) -> list[str]:
         return []
 
     async def aclose(self) -> None:

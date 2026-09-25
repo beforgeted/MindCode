@@ -18,6 +18,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from codeagent.evidence.cursor import EventBatch, EventCursor, SequencedEvent
 from codeagent.evidence.models import AgentEvent, EventType
 
 _SENTINEL = object()
@@ -170,6 +171,50 @@ class JsonlEventStore:
                 if limit is not None and len(out) >= limit:
                     break
         return out
+
+    async def query_after(
+        self,
+        session_id: str,
+        cursor: EventCursor,
+        *,
+        limit: int = 200,
+    ) -> EventBatch:
+        await self.flush()
+        return await asyncio.to_thread(
+            self._query_after_sync,
+            session_id,
+            cursor,
+            max(1, limit),
+        )
+
+    def _query_after_sync(
+        self,
+        session_id: str,
+        cursor: EventCursor,
+        limit: int,
+    ) -> EventBatch:
+        path = self._path_for(session_id)
+        if not path.exists():
+            return EventBatch((), cursor)
+        events: list[SequencedEvent] = []
+        next_ordinal = cursor.next_ordinal
+        with path.open("r", encoding="utf-8") as handle:
+            for ordinal, line in enumerate(handle):
+                if ordinal < cursor.next_ordinal:
+                    continue
+                raw = json.loads(line)
+                events.append(SequencedEvent(ordinal, _from_json(raw)))
+                next_ordinal = ordinal + 1
+                if len(events) >= limit:
+                    break
+        return EventBatch(tuple(events), EventCursor(next_ordinal))
+
+    async def list_session_ids(self) -> list[str]:
+        await self.flush()
+        return await asyncio.to_thread(self._list_session_ids_sync)
+
+    def _list_session_ids_sync(self) -> list[str]:
+        return sorted(path.stem for path in self._sessions_dir.glob("*.jsonl") if path.is_file())
 
 
 def _from_json(raw: dict) -> AgentEvent:

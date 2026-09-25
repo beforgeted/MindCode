@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import unicodedata
 from collections.abc import Callable
@@ -10,6 +11,12 @@ from typing import TypeVar
 
 from codeagent.evidence.models import EvidenceRef, EvidenceType
 from codeagent.infra.ids import new_id
+from codeagent.memory.governance_models import (
+    CandidateReceipt,
+    CandidateStatus,
+    MemoryCandidate,
+    StageResult,
+)
 from codeagent.memory.models import (
     DeleteResult,
     MemoryItem,
@@ -25,7 +32,7 @@ from codeagent.memory.models import (
     NewMemoryItem,
 )
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _T = TypeVar("_T")
 
 
@@ -83,6 +90,72 @@ class SqliteMemoryStore:
 
     async def mark_indexed(self, revision: int) -> None:
         await self._run(lambda conn: self._set_meta(conn, "indexed_revision", str(revision)))
+
+    # --- P4 治理：候选暂存 / 游标 ---
+
+    async def governance_cursor(self, project_id: str, session_id: str) -> int:
+        return await self._run(
+            lambda conn: self._governance_cursor(conn, project_id, session_id),
+            write=False,
+        )
+
+    async def stage_event_batch(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        expected_ordinal: int,
+        next_ordinal: int,
+        last_event_id: str | None,
+        candidates: tuple[MemoryCandidate, ...],
+        receipts: tuple[CandidateReceipt, ...],
+    ) -> StageResult:
+        return await self._run(
+            lambda conn: self._stage_event_batch(
+                conn,
+                project_id,
+                session_id,
+                expected_ordinal,
+                next_ordinal,
+                last_event_id,
+                candidates,
+                receipts,
+            )
+        )
+
+    async def list_pending_candidates(
+        self,
+        project_id: str,
+        session_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[MemoryCandidate]:
+        return await self._run(
+            lambda conn: self._list_pending_candidates(conn, project_id, session_id, limit),
+            write=False,
+        )
+
+    async def finalize_candidate(
+        self,
+        candidate_key: str,
+        *,
+        outcome: CandidateStatus | str,
+        reason: str,
+    ) -> None:
+        await self._run(
+            lambda conn: self._finalize_candidate(conn, candidate_key, str(outcome), reason)
+        )
+
+    async def supersede_and_create(
+        self,
+        old_id: str,
+        draft: NewMemoryItem,
+        *,
+        event_id: str | None = None,
+    ) -> MemoryItem:
+        return await self._run(
+            lambda conn: self._supersede_and_create(conn, old_id, draft, event_id)
+        )
 
     async def aclose(self) -> None:
         async with self._lock:
@@ -146,10 +219,10 @@ class SqliteMemoryStore:
                 raise MemoryUnavailableError(
                     f"Memory DB schema {version} 高于当前支持版本 {_SCHEMA_VERSION}"
                 )
-            if version < 1:
+            for pending in range(version + 1, _SCHEMA_VERSION + 1):
                 conn.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (1, _now().isoformat()),
+                    (pending, _now().isoformat()),
                 )
             self._set_meta(conn, "content_revision", self._meta(conn, "content_revision", "0"))
             self._set_meta(conn, "indexed_revision", self._meta(conn, "indexed_revision", "0"))
@@ -332,6 +405,201 @@ class SqliteMemoryStore:
         assert deleted is not None
         return DeleteResult(deleted)
 
+    def _governance_cursor(
+        self,
+        conn: sqlite3.Connection,
+        project_id: str,
+        session_id: str,
+    ) -> int:
+        row = conn.execute(
+            """SELECT next_ordinal FROM memory_governance_cursor
+               WHERE project_id = ? AND session_id = ?""",
+            (project_id, session_id),
+        ).fetchone()
+        return int(row["next_ordinal"]) if row else 0
+
+    def _stage_event_batch(
+        self,
+        conn: sqlite3.Connection,
+        project_id: str,
+        session_id: str,
+        expected_ordinal: int,
+        next_ordinal: int,
+        last_event_id: str | None,
+        candidates: tuple[MemoryCandidate, ...],
+        receipts: tuple[CandidateReceipt, ...],
+    ) -> StageResult:
+        current = self._governance_cursor(conn, project_id, session_id)
+        if current != expected_ordinal:
+            # CAS 失败：有并发 pass 已推进游标，本批不落库，交由上层用新游标重取。
+            return StageResult(staged=0, receipts=0, duplicates=0, next_ordinal=current)
+        staged = 0
+        duplicates = 0
+        for candidate in candidates:
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO memory_candidates(
+                    candidate_key, project_id, session_id, content, content_sha256,
+                    source, proposed_scope, proposed_type, evidence_json,
+                    source_event_ids_json, reason, extractor_version, contract_version,
+                    status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    candidate.candidate_key,
+                    candidate.project_id,
+                    candidate.session_id,
+                    candidate.content,
+                    candidate.content_sha256,
+                    str(candidate.source),
+                    str(candidate.proposed_scope),
+                    str(candidate.proposed_type),
+                    _dump_evidence(candidate.evidence_refs),
+                    json.dumps(list(candidate.source_event_ids)),
+                    candidate.reason,
+                    candidate.extractor_version,
+                    candidate.contract_version,
+                    str(candidate.status),
+                    candidate.created_at.isoformat(),
+                ),
+            )
+            if cursor.rowcount:
+                staged += 1
+            else:
+                duplicates += 1
+        stored_receipts = 0
+        for receipt in receipts:
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO memory_candidate_receipts(
+                    candidate_key, project_id, session_id, content_sha256,
+                    source_event_ids_json, outcome, reason, extractor_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    receipt.candidate_key,
+                    receipt.project_id,
+                    receipt.session_id,
+                    receipt.content_sha256,
+                    json.dumps(list(receipt.source_event_ids)),
+                    str(receipt.outcome),
+                    str(receipt.reason),
+                    receipt.extractor_version,
+                    receipt.created_at.isoformat(),
+                ),
+            )
+            if cursor.rowcount:
+                stored_receipts += 1
+        conn.execute(
+            """INSERT INTO memory_governance_cursor(
+                project_id, session_id, next_ordinal, last_event_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, session_id) DO UPDATE SET
+                next_ordinal = excluded.next_ordinal,
+                last_event_id = excluded.last_event_id,
+                updated_at = excluded.updated_at""",
+            (project_id, session_id, next_ordinal, last_event_id, _now().isoformat()),
+        )
+        return StageResult(
+            staged=staged,
+            receipts=stored_receipts,
+            duplicates=duplicates,
+            next_ordinal=next_ordinal,
+        )
+
+    def _list_pending_candidates(
+        self,
+        conn: sqlite3.Connection,
+        project_id: str,
+        session_id: str,
+        limit: int,
+    ) -> list[MemoryCandidate]:
+        rows = conn.execute(
+            """SELECT * FROM memory_candidates
+               WHERE project_id = ? AND session_id = ? AND status = ?
+               ORDER BY created_at, candidate_key LIMIT ?""",
+            (project_id, session_id, str(CandidateStatus.PENDING_JUDGE), max(1, limit)),
+        ).fetchall()
+        return [self._row_to_candidate(row) for row in rows]
+
+    def _finalize_candidate(
+        self,
+        conn: sqlite3.Connection,
+        candidate_key: str,
+        outcome: str,
+        reason: str,
+    ) -> None:
+        row = conn.execute(
+            "SELECT * FROM memory_candidates WHERE candidate_key = ?",
+            (candidate_key,),
+        ).fetchone()
+        if row is None:
+            return
+        conn.execute(
+            """INSERT OR IGNORE INTO memory_candidate_receipts(
+                candidate_key, project_id, session_id, content_sha256,
+                source_event_ids_json, outcome, reason, extractor_version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["candidate_key"],
+                row["project_id"],
+                row["session_id"],
+                row["content_sha256"],
+                row["source_event_ids_json"],
+                outcome,
+                reason,
+                row["extractor_version"],
+                _now().isoformat(),
+            ),
+        )
+        conn.execute("DELETE FROM memory_candidates WHERE candidate_key = ?", (candidate_key,))
+
+    def _supersede_and_create(
+        self,
+        conn: sqlite3.Connection,
+        old_id: str,
+        draft: NewMemoryItem,
+        event_id: str | None,
+    ) -> MemoryItem:
+        old = self._get(conn, draft.project_id, old_id, True)
+        if old is None:
+            raise MemoryNotFoundError(f"Memory 不存在: {old_id}")
+        if old.status is MemoryStatus.ACTIVE:
+            now = _now()
+            conn.execute(
+                """UPDATE memory_items
+                   SET status = ?, updated_at = ?, version = version + 1
+                   WHERE project_id = ? AND id = ?""",
+                (str(MemoryStatus.SUPERSEDED), now.isoformat(), draft.project_id, old_id),
+            )
+            self._audit(
+                conn,
+                old_id,
+                draft.project_id,
+                "SUPERSEDE",
+                old.source,
+                old.status,
+                MemoryStatus.SUPERSEDED,
+                old.version + 1,
+                event_id,
+            )
+        return self._create(conn, draft, event_id)
+
+    def _row_to_candidate(self, row: sqlite3.Row) -> MemoryCandidate:
+        return MemoryCandidate(
+            candidate_key=row["candidate_key"],
+            project_id=row["project_id"],
+            session_id=row["session_id"],
+            content=row["content"],
+            content_sha256=row["content_sha256"],
+            source=MemorySource(row["source"]),
+            proposed_scope=MemoryScope(row["proposed_scope"]),
+            proposed_type=MemoryType(row["proposed_type"]),
+            evidence_refs=_load_evidence(row["evidence_json"]),
+            source_event_ids=tuple(json.loads(row["source_event_ids_json"])),
+            reason=row["reason"],
+            extractor_version=row["extractor_version"],
+            contract_version=row["contract_version"],
+            status=CandidateStatus(row["status"]),
+            created_at=_parse_time(row["created_at"]),
+        )
+
     def _row_to_item(self, conn: sqlite3.Connection, row: sqlite3.Row) -> MemoryItem:
         tags = tuple(
             item["tag"]
@@ -433,6 +701,36 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _dump_evidence(refs: tuple[EvidenceRef, ...]) -> str:
+    return json.dumps(
+        [
+            {
+                "type": str(ref.type),
+                "event_id": ref.event_id,
+                "session_id": ref.session_id,
+                "agent_run_id": ref.agent_run_id,
+                "tool_run_id": ref.tool_run_id,
+                "artifact_uri": ref.artifact_uri,
+            }
+            for ref in refs
+        ]
+    )
+
+
+def _load_evidence(raw: str) -> tuple[EvidenceRef, ...]:
+    return tuple(
+        EvidenceRef(
+            type=EvidenceType(item["type"]),
+            event_id=item.get("event_id"),
+            session_id=item.get("session_id"),
+            agent_run_id=item.get("agent_run_id"),
+            tool_run_id=item.get("tool_run_id"),
+            artifact_uri=item.get("artifact_uri"),
+        )
+        for item in json.loads(raw)
+    )
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
@@ -508,7 +806,7 @@ CREATE TABLE IF NOT EXISTS memory_audit (
     audit_id TEXT PRIMARY KEY,
     memory_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
-    action TEXT NOT NULL CHECK(action IN ('CREATE', 'DELETE')),
+    action TEXT NOT NULL CHECK(action IN ('CREATE', 'DELETE', 'SUPERSEDE')),
     actor_source TEXT NOT NULL,
     before_status TEXT,
     after_status TEXT NOT NULL,
@@ -532,4 +830,42 @@ CREATE TRIGGER IF NOT EXISTS memory_items_au AFTER UPDATE OF content ON memory_i
     INSERT INTO memory_fts(memory_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
     INSERT INTO memory_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
+CREATE TABLE IF NOT EXISTS memory_candidates (
+    candidate_key TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    source TEXT NOT NULL,
+    proposed_scope TEXT NOT NULL,
+    proposed_type TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    source_event_ids_json TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    extractor_version TEXT NOT NULL,
+    contract_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS memory_candidates_pending_idx
+ON memory_candidates(project_id, session_id, status, created_at);
+CREATE TABLE IF NOT EXISTS memory_candidate_receipts (
+    candidate_key TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    source_event_ids_json TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    extractor_version TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_governance_cursor (
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    next_ordinal INTEGER NOT NULL,
+    last_event_id TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(project_id, session_id)
+);
 """

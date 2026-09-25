@@ -3,8 +3,7 @@
 Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落地方案与分期见
 [`MindCode_实现设计_V1.md`](MindCode_实现设计_V1.md)。
 
-当前落地范围：**P0–P3 单 Agent**。P4 的自动记忆治理、P5 Multi-Agent 和
-P6 恢复能力仍未实现。
+当前落地范围：**P0–P4 单 Agent**。P5 Multi-Agent 和 P6 恢复能力仍未实现。
 
 ## 快速开始
 
@@ -20,7 +19,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 python -m codeagent.cli.app --workspace /path/to/repo
 ```
 
-REPL 命令：`/context` `/compact` `/memory add|list|search|show|delete` `/clear`
+REPL 命令：`/context` `/compact` `/memory add|list|search|show|delete|harvest` `/clear`
 `/metrics` `/quit`。
 
 Memory 示例：
@@ -34,7 +33,9 @@ Memory 示例：
 ```
 
 Memory 以本地明文保存在项目 `memory.db` 中，`memory/MEMORY.md` 只是可重建的
-人审投影。P3 不会从 Session 自动写 Memory，也不提供自动敏感信息检测。
+人审投影。除用户显式 `/memory add` 外，P4 起会在 Session End（或 `/memory harvest`）
+自动从会话事件里抽取候选、经 LLM Judge 判断后治理写入；不设 API key 时 Judge 走
+StubLlmClient，会保守地不写入。
 
 ```bash
 pytest              # 全部测试
@@ -62,16 +63,22 @@ pyright             # 类型
 | Request-local Memory 检索与有界注入 | `memory/retriever.py`、`context/manager.py` |
 | `/memory` 显式管理与 MEMORY.md 投影 | `cli/memory.py`、`memory/index_projector.py` |
 | 内置工具 | `tool/builtin/` |
+| P4 事件游标 + 候选暂存（崩溃安全 CAS 幂等） | `evidence/cursor.py`、`memory/sqlite_store.py` |
+| P4 保守候选抽取 + 敏感/噪声预过滤 | `memory/candidate_extractor.py`、`memory/prefilter.py` |
+| P4 LLM MemoryJudge（pydantic 校验 + 修复重试 + 保守失败） | `memory/judge.py` |
+| P4 本地去重 + 冲突消解（supersede/版本化） | `memory/dedup.py`、`memory/conflict.py`、`memory/sqlite_store.py` |
+| P4 治理编排（Session End / `/memory harvest`） | `memory/governance_service.py`、`session.py` |
+| P4 检索重排（§29 来源优先级）+ Progressive Disclosure | `memory/retriever.py`、`tool/builtin/memory_get.py`、`tool/builtin/evidence_get.py` |
 
 ## 未实现（按分期）
 
-- **P3 验证缺口**：真实模型 benchmark、长期抗漂移、CLI 人工验收
-- **P4** 自动候选 / LLM Judge / dedup / conflict / sensitive filter / hybrid retrieval
+- **P4 验证缺口**：真实模型 Judge benchmark、向量检索（当前 hybrid 仅关键字路）
 - **P5** Multi-Agent 并行 + Workspace 隔离
 - **P6** 资源锁清理 / Run 持久化 / 共享 Memory
 
-P2/P3 都采用保守失败：压缩失败不替换 History，Memory 检索失败不阻断对话，
-最终越过 hard limit 才抛 `ContextOverflowError`，绝不静默截断历史。
+P2/P3/P4 都采用保守失败：压缩失败不替换 History，Memory 检索失败不阻断对话，
+Judge/治理链失败宁可不写长期 Memory，最终越过 hard limit 才抛 `ContextOverflowError`，
+绝不静默截断历史。
 
 ## 安全说明
 

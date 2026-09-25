@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from codeagent.context.compact.models import TaskCheckpoint
-from codeagent.memory.models import MemoryItem, MemorySearchQuery
+from codeagent.memory.models import MemoryItem, MemorySearchQuery, MemorySource
 from codeagent.memory.repository import MemoryRepository
 
 _CJK_RE = re.compile(r"[　-ヿ㐀-鿿豈-﫿]+")
@@ -43,9 +43,18 @@ class NullMemoryRetriever:
 
 
 class KeywordMemoryRetriever:
-    def __init__(self, repository: MemoryRepository, project_id: str) -> None:
+    def __init__(
+        self,
+        repository: MemoryRepository,
+        project_id: str,
+        *,
+        source_weights: dict[MemorySource, float] | None = None,
+        importance_weight: float = 0.03,
+    ) -> None:
         self._repository = repository
         self._project_id = project_id
+        self._source_weights = source_weights or {}
+        self._importance_weight = importance_weight
 
     async def retrieve(
         self,
@@ -69,7 +78,10 @@ class KeywordMemoryRetriever:
             for rank, hit in enumerate(hits, 1):
                 items[hit.item.id] = hit.item
                 scores[hit.item.id] = scores.get(hit.item.id, 0.0) + weight / rank
-        ranked = [RankedMemory(item, scores[memory_id]) for memory_id, item in items.items()]
+        ranked = [
+            RankedMemory(item, self._rerank(scores[memory_id], item))
+            for memory_id, item in items.items()
+        ]
         ranked.sort(
             key=lambda value: (
                 -value.score,
@@ -78,6 +90,12 @@ class KeywordMemoryRetriever:
             )
         )
         return tuple(ranked[: max(0, limit)])
+
+    def _rerank(self, base: float, item: MemoryItem) -> float:
+        # §29 优先级阶梯：助手推导记忆权重低于用户显式 / 已验证记忆。
+        weight = self._source_weights.get(item.source, 1.0)
+        importance = (item.importance or 0) * self._importance_weight
+        return base * weight + importance
 
 
 def _checkpoint_terms(checkpoint: TaskCheckpoint | None, limit: int) -> tuple[str, ...]:

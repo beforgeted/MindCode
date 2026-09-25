@@ -21,12 +21,18 @@ from codeagent.infra.ids import new_session_id
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
 from codeagent.llm.types import ModelConfig
+from codeagent.memory.dedup import MemoryDeduplicator
+from codeagent.memory.governance_service import MemoryGovernanceService
 from codeagent.memory.index_projector import MemoryIndexProjector
+from codeagent.memory.judge import LlmMemoryJudge
+from codeagent.memory.models import MemorySource
 from codeagent.memory.retriever import KeywordMemoryRetriever
 from codeagent.memory.service import MemoryService
 from codeagent.memory.sqlite_store import SqliteMemoryStore
 from codeagent.runtime.react_engine import ReActEngine
 from codeagent.tool.builtin import default_tools
+from codeagent.tool.builtin.evidence_get import EvidenceGetTool
+from codeagent.tool.builtin.memory_get import MemoryGetTool
 from codeagent.tool.execution_manager import ToolExecutionManager
 from codeagent.tool.normalizer import ToolResultNormalizer
 from codeagent.tool.registry import ToolRegistry
@@ -50,13 +56,14 @@ class AgentSession:
         self.event_store = JsonlEventStore(config.state_root)
         self.artifact_store = FileArtifactStore(config.state_root)
         self.memory_store = SqliteMemoryStore(config.state_root / "memory.db")
+        self.memory_projector = MemoryIndexProjector(
+            config.state_root,
+            self.memory_store,
+            config.effective_project_id,
+        )
         self.memory_service = MemoryService(
             self.memory_store,
-            MemoryIndexProjector(
-                config.state_root,
-                self.memory_store,
-                config.effective_project_id,
-            ),
+            self.memory_projector,
             self.event_store,
             project_id=config.effective_project_id,
             session_id=self.session_id,
@@ -64,9 +71,40 @@ class AgentSession:
         self.memory_retriever = KeywordMemoryRetriever(
             self.memory_store,
             config.effective_project_id,
+            source_weights={
+                MemorySource.USER_EXPLICIT: config.profile.memory_weight_user_explicit,
+                MemorySource.TOOL_VERIFIED: config.profile.memory_weight_tool_verified,
+                MemorySource.ASSISTANT_DERIVED: config.profile.memory_weight_assistant_derived,
+            },
+            importance_weight=config.profile.memory_importance_weight,
+        )
+        self.governance = MemoryGovernanceService(
+            event_store=self.event_store,
+            repository=self.memory_store,
+            judge=LlmMemoryJudge(
+                llm_client,
+                ModelConfig(
+                    model=config.model, context_window=config.profile.context_window
+                ),
+                max_repair_retries=config.profile.memory_judge_max_retries,
+            ),
+            project_id=config.effective_project_id,
+            batch_limit=config.profile.memory_harvest_batch_limit,
+            promote_limit=config.profile.memory_promote_limit,
+            prefilter_max_bytes=config.profile.memory_prefilter_max_bytes,
+            deduplicator=MemoryDeduplicator(
+                jaccard_threshold=config.profile.memory_dedup_jaccard
+            ),
+            metrics=self.metrics,
         )
         self.estimator = HeuristicTokenEstimator()
-        self.registry = ToolRegistry(default_tools())
+        self.registry = ToolRegistry(
+            [
+                *default_tools(),
+                MemoryGetTool(self.memory_store, config.effective_project_id),
+                EvidenceGetTool(self.event_store),
+            ]
+        )
         self.definition = definition or AgentDefinition(
             id="mindcode",
             name="MindCode",
@@ -142,8 +180,29 @@ class AgentSession:
 
     async def aclose(self) -> None:
         if self.memory_service.available:
+            await self.run_governance()
             await self.memory_service.aclose()
         await self.event_store.aclose()
+
+    async def run_governance(self) -> str:
+        """Session End 记忆治理（记忆 V2 §44）：抽取 → Judge → 去重/冲突 → 落库 → 刷新索引。
+
+        保守失败：治理链内部异常不会打断关闭流程。
+        """
+        if not self.memory_service.available:
+            return "[memory 不可用，跳过治理]"
+        try:
+            await self.event_store.flush()
+            harvest, promote = await self.governance.run(self.session_id)
+            await self.memory_projector.refresh_if_stale()
+            return (
+                f"[治理] 抽取 staged={harvest.staged} receipts={harvest.receipts} | "
+                f"judged={promote.judged} promoted={promote.promoted} "
+                f"superseded={promote.superseded} skipped={promote.skipped}"
+            )
+        except Exception as exc:
+            self.metrics.incr("memory.governance.session_end_failures")
+            return f"[治理失败，已跳过] {type(exc).__name__}: {exc}"
 
     async def send(self, user_input: str) -> AgentRunResult:
         return await self.engine.run_turn(self.run, user_input)

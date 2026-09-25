@@ -40,7 +40,7 @@ from codeagent.context.token_estimator import HeuristicTokenEstimator, TokenEsti
 from codeagent.infra import metrics as M
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.message import ContextCategory, Message, Role
-from codeagent.memory.models import MemoryItem
+from codeagent.memory.models import MemoryItem, MemorySource
 from codeagent.memory.retriever import MemoryRetriever, NullMemoryRetriever, RankedMemory
 
 
@@ -307,11 +307,16 @@ def _render_memory_message(items: list[MemoryItem]) -> Message:
     for item in items:
         content = item.content.replace("</internal_context>", "&lt;/internal_context&gt;")
         refs = ", ".join(str(ref) for ref in item.evidence_refs) or "none"
+        authority = (
+            "low (assistant-derived)"
+            if item.source is MemorySource.ASSISTANT_DERIVED
+            else "reference"
+        )
         lines.extend(
             (
                 "",
                 f"## {item.id} [{item.type}]",
-                f"source={item.source} updated={item.updated_at.isoformat()}",
+                f"source={item.source} authority={authority} updated={item.updated_at.isoformat()}",
                 content,
                 f"evidence={refs}",
             )

@@ -40,6 +40,19 @@ class ContextProfile:
     memory_selected_limit: int = 20
     memory_retrieval_timeout_seconds: float = 0.5
 
+    # Memory 检索重排权重（P4 §29 优先级阶梯：显式/已验证 > 助手推导）
+    memory_weight_user_explicit: float = 1.0
+    memory_weight_tool_verified: float = 0.9
+    memory_weight_assistant_derived: float = 0.5
+    memory_importance_weight: float = 0.03
+
+    # Memory 自动治理（P4）
+    memory_harvest_batch_limit: int = 200
+    memory_promote_limit: int = 100
+    memory_dedup_jaccard: float = 0.9
+    memory_judge_max_retries: int = 1
+    memory_prefilter_max_bytes: int = 16 * 1024
+
     # Tool 结果治理（P1）
     # tool 边界硬上限：超过这个数一律 offload 到 artifact
     max_tool_result_tokens: int = 6_000

@@ -20,8 +20,8 @@ from codeagent.context.manager import ContextOverflowError
 from codeagent.llm.stub_client import StubLlmClient
 from codeagent.session import AgentSession
 
-BANNER = """MindCode CodeAgent (P0-P3 单 Agent)
-命令: /context  /compact  /memory add|list|search|show|delete  /clear  /metrics  /quit
+BANNER = """MindCode CodeAgent (P0-P4 单 Agent)
+命令: /context  /compact  /memory add|list|search|show|delete|harvest  /clear  /metrics  /quit
 """
 
 
@@ -70,7 +70,10 @@ async def _handle_command(session: AgentSession, line: str) -> bool:
         session.clear()
         print("[已开新 Session Context。Raw Events 与 Durable Memory 不受影响]")
     elif command == "/memory":
-        print(await handle_memory_command(session.memory_service, rest))
+        if rest.strip() == "harvest":
+            print(await session.run_governance())
+        else:
+            print(await handle_memory_command(session.memory_service, rest))
     elif command == "/metrics":
         snapshot = session.metrics.snapshot()
         for group, values in snapshot.items():
