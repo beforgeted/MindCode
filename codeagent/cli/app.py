@@ -47,7 +47,7 @@ async def _handle_command(session: AgentSession, line: str, *, config, client) -
         if not rest:
             print("用法: /task <目标>")
             return True
-        await _run_task(config, client, rest)
+        await _run_task(session, config, client, rest)
         return True
 
     if command == "/context":
@@ -95,12 +95,19 @@ async def _handle_command(session: AgentSession, line: str, *, config, client) -
     return True
 
 
-async def _run_task(config: AppConfig, client, goal: str) -> None:
-    """P5 Multi-Agent：规划 → 并行 Worker → 验收 → 合并。"""
-    from codeagent.orchestration.master_session import MasterSession
+async def _run_task(session: AgentSession, config: AppConfig, client, goal: str) -> None:
+    """P5 Multi-Agent：规划 → 并行 Worker → 验收 → 合并。复用当前活着的 session。"""
+    from codeagent.orchestration.master_session import build_master
 
-    async with MasterSession(config, llm_client=client) as master:
-        final = await master.run_task(goal)
+    master = await build_master(
+        config=config,
+        llm_client=client,
+        engine=session.engine,
+        event_store=session.event_store,
+        metrics=session.metrics,
+        definition=session.definition,
+    )
+    final = await master.run(goal, session_id=session.session_id)
     print(f"\n[任务{'已接受' if final.accepted else '未接受'}] {final.reason}")
     sched = final.scheduler
     if sched is not None:

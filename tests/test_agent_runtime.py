@@ -81,3 +81,13 @@ async def test_workspace_is_injected(tmp_path: Path):
     assert worker.workspace.root == _resolved(tmp_path)
     assert worker.run.workspace.root == _resolved(tmp_path)
     assert worker.verification.ok  # AlwaysPassVerifier 默认
+
+
+async def test_trace_id_is_threaded_onto_run(tmp_path: Path):
+    engine = FakeEngine()
+    runtime = AgentRuntime(
+        react_engine=engine,
+        workspace_manager=LocalWorkspaceManager(tmp_path),
+    )
+    worker = await runtime.run(_DEFN, _STEP, session_id="s", trace_id="mrun_xyz")
+    assert worker.run.context.trace_id == "mrun_xyz"

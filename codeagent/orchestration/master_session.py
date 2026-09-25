@@ -6,27 +6,90 @@ StepScheduler / GlobalVerifier / MasterRuntime。
 
 ReActEngine 本就是 run-agnostic（run_turn 接任意 AgentRun），所以多个并行 Worker
 共享同一个 engine 实例，各自带独立 AgentRun + WorkspaceContext。
+
+`build_master` 是唯一的装配入口，REPL 的 /task 直接复用**当前活着的** AgentSession，
+不再另起一个 session。
 """
 
 from __future__ import annotations
 
 from types import TracebackType
 
+from codeagent.agent.models import AgentDefinition
 from codeagent.agent.registry import AgentRegistry
 from codeagent.config import AppConfig
+from codeagent.evidence.event_store import RawEventStore
+from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
 from codeagent.llm.types import ModelConfig
-from codeagent.orchestration.global_verifier import GlobalVerifier, NoFailureVerifier
+from codeagent.orchestration.global_verifier import (
+    GlobalVerifier,
+    LlmGlobalVerifier,
+    NoFailureVerifier,
+)
 from codeagent.orchestration.master_runtime import FinalResult, MasterRuntime
 from codeagent.orchestration.planner import LlmPlanner, Planner
 from codeagent.orchestration.step_scheduler import StepScheduler
 from codeagent.runtime.agent_runtime import AgentRuntime
-from codeagent.runtime.local_verifier import LocalVerifier, StatusLocalVerifier
+from codeagent.runtime.local_verifier import LlmLocalVerifier, LocalVerifier, StatusLocalVerifier
+from codeagent.runtime.react_engine import ReActEngine
 from codeagent.session import AgentSession
 from codeagent.workspace.manager import build_workspace_manager
 
 
+async def build_master(
+    *,
+    config: AppConfig,
+    llm_client: LlmClient,
+    engine: ReActEngine,
+    event_store: RawEventStore,
+    metrics: Metrics,
+    definition: AgentDefinition,
+    isolation: str = "auto",
+    planner: Planner | None = None,
+    local_verifier: LocalVerifier | None = None,
+    global_verifier: GlobalVerifier | None = None,
+) -> MasterRuntime:
+    """装配 MasterRuntime。stub LLM 下 Verifier 用确定性实现，真实模型下用 LLM 实现。"""
+    model_config = ModelConfig(
+        model=config.model, context_window=config.profile.context_window
+    )
+    wsm = await build_workspace_manager(config.workspace_root, isolation=isolation)
+    registry = AgentRegistry(default=definition)
+    stub = config.use_stub_llm
+    lverif = local_verifier or (
+        StatusLocalVerifier() if stub else LlmLocalVerifier(llm_client, model_config)
+    )
+    gverif = global_verifier or (
+        NoFailureVerifier() if stub else LlmGlobalVerifier(llm_client, model_config)
+    )
+    runtime = AgentRuntime(
+        react_engine=engine,
+        workspace_manager=wsm,
+        local_verifier=lverif,
+        event_store=event_store,
+        metrics=metrics,
+    )
+    scheduler = StepScheduler(
+        agent_runtime=runtime,
+        agent_registry=registry,
+        max_concurrency=config.profile.agent_max_concurrency,
+        isolated=wsm.isolated,
+        metrics=metrics,
+    )
+    return MasterRuntime(
+        planner=planner or LlmPlanner(llm_client, model_config),
+        scheduler=scheduler,
+        global_verifier=gverif,
+        workspace_manager=wsm,
+        max_replans=config.profile.master_max_replans,
+        metrics=metrics,
+    )
+
+
 class MasterSession:
+    """独立/编程使用：自持一个 AgentSession 生命周期。REPL 走 build_master 复用活 session。"""
+
     def __init__(
         self,
         config: AppConfig,
@@ -40,7 +103,7 @@ class MasterSession:
         self._config = config
         self._llm = llm_client
         self._isolation = isolation
-        self._planner_override = planner
+        self._planner = planner
         self._local_verifier = local_verifier
         self._global_verifier = global_verifier
         self.session = AgentSession(config, llm_client=llm_client)
@@ -48,35 +111,17 @@ class MasterSession:
 
     async def __aenter__(self) -> MasterSession:
         await self.session.__aenter__()
-        model_config = ModelConfig(
-            model=self._config.model, context_window=self._config.profile.context_window
-        )
-        wsm = await build_workspace_manager(
-            self._config.workspace_root, isolation=self._isolation
-        )
-        registry = AgentRegistry(default=self.session.definition)
-        agent_runtime = AgentRuntime(
-            react_engine=self.session.engine,
-            workspace_manager=wsm,
-            local_verifier=self._local_verifier or StatusLocalVerifier(),
+        self.master = await build_master(
+            config=self._config,
+            llm_client=self._llm,
+            engine=self.session.engine,
             event_store=self.session.event_store,
             metrics=self.session.metrics,
-        )
-        scheduler = StepScheduler(
-            agent_runtime=agent_runtime,
-            agent_registry=registry,
-            max_concurrency=self._config.profile.agent_max_concurrency,
-            isolated=wsm.isolated,
-            metrics=self.session.metrics,
-        )
-        planner = self._planner_override or LlmPlanner(self._llm, model_config)
-        self.master = MasterRuntime(
-            planner=planner,
-            scheduler=scheduler,
-            global_verifier=self._global_verifier or NoFailureVerifier(),
-            workspace_manager=wsm,
-            max_replans=self._config.profile.master_max_replans,
-            metrics=self.session.metrics,
+            definition=self.session.definition,
+            isolation=self._isolation,
+            planner=self._planner,
+            local_verifier=self._local_verifier,
+            global_verifier=self._global_verifier,
         )
         return self
 

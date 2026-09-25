@@ -21,8 +21,12 @@ _DEFN = AgentDefinition(id="default", name="D", system_prompt="")
 class FakeRuntime:
     def __init__(self, *, fail=frozenset()):
         self._fail = fail
+        self.trace_ids: list = []
 
-    async def run(self, definition, step, *, session_id, cancellation=None) -> WorkerRun:
+    async def run(
+        self, definition, step, *, session_id, cancellation=None, trace_id=None
+    ) -> WorkerRun:
+        self.trace_ids.append(trace_id)
         run = AgentRun.create(
             definition, session_id=session_id, workspace=WorkspaceContext.local(Path("."))
         )
@@ -72,6 +76,10 @@ async def test_master_runs_multi_step_and_aggregates(tmp_path: Path):
     assert final.scheduler.completed == {"a", "b"}
     assert {f.path for f in final.files} == {"a.py", "b.py"}
     assert final.replans == 0
+    # master_run_id 生成并作为 trace_id 下传给每个 Worker（§27 溯源链）。
+    assert final.master_run_id
+    runtime = master._scheduler._runtime  # type: ignore[attr-defined]
+    assert set(runtime.trace_ids) == {final.master_run_id}
 
 
 async def test_master_replans_on_rejection(tmp_path: Path):

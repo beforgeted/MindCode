@@ -51,6 +51,7 @@ class StepScheduler:
         *,
         session_id: str,
         cancellation: CancellationToken | None = None,
+        trace_id: str | None = None,
     ) -> SchedulerResult:
         semaphore = asyncio.Semaphore(self._max_concurrency)
         write_lock = asyncio.Lock()
@@ -64,7 +65,9 @@ class StepScheduler:
             busy = set(running.values())
             for step in graph.ready(completed, exclude=busy | set(workers)):
                 task = asyncio.create_task(
-                    self._run_step(step, session_id, semaphore, write_lock, cancellation)
+                    self._run_step(
+                        step, session_id, semaphore, write_lock, cancellation, trace_id
+                    )
                 )
                 running[task] = step.id
             if not running:
@@ -95,14 +98,23 @@ class StepScheduler:
         semaphore: asyncio.Semaphore,
         write_lock: asyncio.Lock,
         cancellation: CancellationToken | None,
+        trace_id: str | None,
     ) -> WorkerRun:
         definition = self._registry.get(step.agent_id)
         async with semaphore:
             if not self._isolated and not step.read_only:
                 async with write_lock:
                     return await self._runtime.run(
-                        definition, step, session_id=session_id, cancellation=cancellation
+                        definition,
+                        step,
+                        session_id=session_id,
+                        cancellation=cancellation,
+                        trace_id=trace_id,
                     )
             return await self._runtime.run(
-                definition, step, session_id=session_id, cancellation=cancellation
+                definition,
+                step,
+                session_id=session_id,
+                cancellation=cancellation,
+                trace_id=trace_id,
             )

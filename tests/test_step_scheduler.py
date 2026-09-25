@@ -23,7 +23,9 @@ class FakeRuntime:
         self.peak = 0
         self.completion_order: list[str] = []
 
-    async def run(self, definition, step, *, session_id, cancellation=None) -> WorkerRun:
+    async def run(
+        self, definition, step, *, session_id, cancellation=None, trace_id=None
+    ) -> WorkerRun:
         self.active += 1
         self.peak = max(self.peak, self.active)
         try:

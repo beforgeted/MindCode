@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from codeagent.agent.models import FileState
 from codeagent.evidence.models import EvidenceRef
+from codeagent.infra.ids import new_id
 from codeagent.infra.metrics import Metrics
 from codeagent.orchestration.global_verifier import GlobalVerifier
 from codeagent.orchestration.planner import Planner
@@ -24,6 +25,7 @@ class FinalResult:
     task: str
     accepted: bool
     reason: str = ""
+    master_run_id: str = ""
     scheduler: SchedulerResult | None = None
     files: tuple[FileState, ...] = ()
     evidence_refs: tuple[EvidenceRef, ...] = ()
@@ -50,7 +52,9 @@ class MasterRuntime:
         self._max_replans = max(0, max_replans)
         self._metrics = metrics or Metrics()
 
-    async def run(self, task: str, *, session_id: str) -> FinalResult:
+    async def run(self, task: str, *, session_id: str, cancellation=None) -> FinalResult:
+        master_run_id = new_id("mrun")
+        self._metrics.incr("master.runs")
         graph = await self._planner.plan(task)
         result: SchedulerResult | None = None
         verdict = None
@@ -58,7 +62,12 @@ class MasterRuntime:
         current_task = task
 
         while True:
-            result = await self._scheduler.run(graph, session_id=session_id)
+            result = await self._scheduler.run(
+                graph,
+                session_id=session_id,
+                cancellation=cancellation,
+                trace_id=master_run_id,
+            )
             verdict = await self._verifier.verify(current_task, graph, result)
             if verdict.accept or replans >= self._max_replans:
                 break
@@ -81,6 +90,7 @@ class MasterRuntime:
             task=task,
             accepted=verdict.accept,
             reason=verdict.reason,
+            master_run_id=master_run_id,
             scheduler=result,
             files=tuple(files),
             evidence_refs=tuple(evidence),
