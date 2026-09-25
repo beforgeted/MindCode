@@ -110,9 +110,9 @@ evidence_refs / memory_candidates。Worker 的过程细节通过 `EvidenceRef` �
 |---|---|---|
 | P0 | 地基与可观测 | ✅ 已完成 |
 | P1 | Evidence 平面 + Tool 结果治理 + ContextManager 外壳 | ✅ 已完成 |
-| P2 | Turn 状态机 + Compaction 重写 + TaskCheckpoint | ⬜ 挂载点已备好 |
-| P3 | 本地 Durable Memory 最小闭环 | ⬜ |
-| P4 | Memory 写入治理 + 检索质量 | ⬜ |
+| P2 | Turn 状态机 + Compaction 重写 + TaskCheckpoint | ✅ 已完成 |
+| P3 | 本地 Durable Memory 最小闭环 | ✅ 已完成 |
+| P4 | Memory 写入治理 + 检索质量 | ✅ 已完成 |
 | P5 | Multi-Agent 执行骨架 + Workspace 隔离 | ⬜ |
 | P6 | 资源锁清理 / Run 持久化 / 共享 Memory | ⬜ |
 
@@ -200,6 +200,8 @@ Memory 的 `EvidenceRef` 可回溯事件或 artifact；检索失败降级继续�
 （`memory_get` / `evidence_get` 两级下钻）。
 
 **退出标准**：§47.3–47.6 通过，尤其 47.5（assistant 猜测不能升级成高可信事实）。
+✅ 已完成（`tests/test_memory_governance_acceptance.py` 覆盖 §47.3–47.6；治理链见
+`memory/governance_service.py`、`memory/judge.py`、`memory/dedup.py`、`memory/conflict.py`）。
 
 ### P5 Multi-Agent 执行骨架 + Workspace 隔离
 
