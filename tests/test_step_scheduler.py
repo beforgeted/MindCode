@@ -6,6 +6,7 @@ from pathlib import Path
 from codeagent.agent.models import AgentDefinition, AgentRunResult
 from codeagent.agent.registry import AgentRegistry
 from codeagent.agent.run import AgentRun
+from codeagent.infra.cancellation import CancellationToken
 from codeagent.orchestration.step_scheduler import StepScheduler
 from codeagent.orchestration.task_graph import Step, TaskGraph
 from codeagent.runtime.agent_runtime import WorkerRun
@@ -117,3 +118,26 @@ async def test_non_isolated_serializes_writes_but_parallelizes_reads():
     reader = FakeRuntime(delays={"a": 0.05, "b": 0.05})
     await _scheduler(reader, isolated=False).run(graph_reads, session_id="s")
     assert reader.peak == 2  # 只读免锁，仍并行
+
+
+async def test_cancellation_token_is_forwarded_to_workers():
+    seen: list = []
+
+    class RecordingRuntime:
+        async def run(self, definition, step, *, session_id, cancellation=None, trace_id=None):
+            seen.append(cancellation)
+            run = AgentRun.create(
+                definition, session_id=session_id, workspace=WorkspaceContext.local(Path("."))
+            )
+            return WorkerRun(
+                step_id=step.id,
+                run=run,
+                result=AgentRunResult.success(run.run_id, step.id),
+                workspace=run.workspace,
+                verification=VerificationResult(ok=True),
+            )
+
+    token = CancellationToken()
+    graph = TaskGraph([Step("a", "default", "A")])
+    await _scheduler(RecordingRuntime()).run(graph, session_id="s", cancellation=token)
+    assert seen == [token]
