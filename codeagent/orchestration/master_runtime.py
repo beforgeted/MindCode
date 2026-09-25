@@ -114,6 +114,10 @@ class MasterRuntime:
             if not worker.workspace.is_isolated or not worker.workspace.branch_name:
                 continue
             try:
+                # 先把 worktree 里的改动提交到分支，否则 merge 带不回 base。
+                committed = await self._wsm.commit(worker.workspace)
+                if not committed:
+                    continue
                 await self._wsm.merge(worker.workspace)
                 merged.append(worker.workspace.branch_name)
             except GitWorktreeError as exc:

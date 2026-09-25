@@ -86,6 +86,26 @@ class GitWorktreeWorkspaceManager:
             except GitWorktreeError:
                 pass
 
+    async def commit(
+        self, workspace: WorkspaceContext, *, message: str = "codeagent worker changes"
+    ) -> bool:
+        """把 worktree 工作区的改动提交到它的分支。无改动返回 False。
+
+        隔离模式下 Worker 的文件改动只在自己的 worktree 里，必须先提交到分支，
+        MasterRuntime 才能通过 merge 把它带回 base。
+        """
+        if not workspace.is_isolated:
+            return False
+        return await asyncio.to_thread(self._commit_sync, workspace, message)
+
+    def _commit_sync(self, workspace: WorkspaceContext, message: str) -> bool:
+        _run_git(workspace.root, "add", "-A")
+        status = _run_git(workspace.root, "status", "--porcelain")
+        if not status.strip():
+            return False
+        _run_git(workspace.root, "commit", "-m", message)
+        return True
+
     async def merge(self, workspace: WorkspaceContext) -> None:
         """把 Worker 分支合并回 base。冲突时抛 GitWorktreeError，不自动解冲突。"""
         if not workspace.branch_name:
