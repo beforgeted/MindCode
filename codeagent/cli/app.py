@@ -20,8 +20,9 @@ from codeagent.context.manager import ContextOverflowError
 from codeagent.llm.stub_client import StubLlmClient
 from codeagent.session import AgentSession
 
-BANNER = """MindCode CodeAgent (P0-P4 单 Agent)
-命令: /context  /compact  /memory add|list|search|show|delete|harvest  /clear  /metrics  /quit
+BANNER = """MindCode CodeAgent (P0-P5 单/多 Agent)
+命令: /context /compact /memory add|list|search|show|delete|harvest
+      /task <目标> /clear /metrics /quit
 """
 
 
@@ -34,13 +35,20 @@ def _build_client(config: AppConfig):
     return AnthropicLlmClient()
 
 
-async def _handle_command(session: AgentSession, line: str) -> bool:
+async def _handle_command(session: AgentSession, line: str, *, config, client) -> bool:
     """返回 False 表示退出。"""
     command, _, rest = line.partition(" ")
     rest = rest.strip()
 
     if command in ("/quit", "/exit"):
         return False
+
+    if command == "/task":
+        if not rest:
+            print("用法: /task <目标>")
+            return True
+        await _run_task(config, client, rest)
+        return True
 
     if command == "/context":
         print(
@@ -87,6 +95,29 @@ async def _handle_command(session: AgentSession, line: str) -> bool:
     return True
 
 
+async def _run_task(config: AppConfig, client, goal: str) -> None:
+    """P5 Multi-Agent：规划 → 并行 Worker → 验收 → 合并。"""
+    from codeagent.orchestration.master_session import MasterSession
+
+    async with MasterSession(config, llm_client=client) as master:
+        final = await master.run_task(goal)
+    print(f"\n[任务{'已接受' if final.accepted else '未接受'}] {final.reason}")
+    sched = final.scheduler
+    if sched is not None:
+        print(
+            f"Step: 完成 {len(sched.completed)} / 失败 {len(sched.failed)} / "
+            f"阻塞 {len(sched.blocked)}，最大并行 {sched.max_parallel}"
+        )
+    if final.merged_branches:
+        print(f"已合并分支: {', '.join(final.merged_branches)}")
+    if final.merge_conflicts:
+        print(f"合并冲突（需人工处理）: {'; '.join(final.merge_conflicts)}")
+    if final.files:
+        print("改动文件:")
+        for state in final.files:
+            print(f"  {state.change}: {state.path}")
+
+
 async def run_repl(config: AppConfig) -> int:
     client = _build_client(config)
     print(BANNER)
@@ -104,7 +135,7 @@ async def run_repl(config: AppConfig) -> int:
             if not line:
                 continue
             if line.startswith("/"):
-                if not await _handle_command(session, line):
+                if not await _handle_command(session, line, config=config, client=client):
                     break
                 continue
             try:

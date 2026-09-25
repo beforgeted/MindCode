@@ -3,7 +3,7 @@
 Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落地方案与分期见
 [`MindCode_实现设计_V1.md`](MindCode_实现设计_V1.md)。
 
-当前落地范围：**P0–P4 单 Agent**。P5 Multi-Agent 和 P6 恢复能力仍未实现。
+当前落地范围：**P0–P5**（单 Agent + Multi-Agent 执行骨架）。P6 恢复能力仍未实现。
 
 ## 快速开始
 
@@ -19,8 +19,9 @@ export ANTHROPIC_API_KEY=sk-ant-...
 python -m codeagent.cli.app --workspace /path/to/repo
 ```
 
-REPL 命令：`/context` `/compact` `/memory add|list|search|show|delete|harvest` `/clear`
-`/metrics` `/quit`。
+REPL 命令：`/context` `/compact` `/memory add|list|search|show|delete|harvest`
+`/task <目标>` `/clear` `/metrics` `/quit`。`/task` 走 P5 Multi-Agent：规划 → 并行 Worker
+（git 仓库下各自 worktree 隔离，非 git 回退只读并行+写串行）→ 验收 → 合并回 base。
 
 Memory 示例：
 
@@ -69,16 +70,20 @@ pyright             # 类型
 | P4 本地去重 + 冲突消解（supersede/版本化） | `memory/dedup.py`、`memory/conflict.py`、`memory/sqlite_store.py` |
 | P4 治理编排（Session End / `/memory harvest`） | `memory/governance_service.py`、`session.py` |
 | P4 检索重排（§29 来源优先级）+ Progressive Disclosure | `memory/retriever.py`、`tool/builtin/memory_get.py`、`tool/builtin/evidence_get.py` |
+| P5 TaskGraph + Planner（LLM/Static，保守失败退化单 Step） | `orchestration/task_graph.py`、`orchestration/planner.py` |
+| P5 AgentRuntime（reflection）+ LocalVerifier | `runtime/agent_runtime.py`、`runtime/local_verifier.py` |
+| P5 StepScheduler（pending-set 增量派发，非 barrier） | `orchestration/step_scheduler.py` |
+| P5 Workspace 隔离（git worktree / 非 git 回退） | `workspace/manager.py`、`workspace/git_worktree.py` |
+| P5 MasterRuntime（plan→schedule→verify→replan→merge→cleanup） | `orchestration/master_runtime.py`、`orchestration/master_session.py` |
 
 ## 未实现（按分期）
 
-- **P4 验证缺口**：真实模型 Judge benchmark、向量检索（当前 hybrid 仅关键字路）
-- **P5** Multi-Agent 并行 + Workspace 隔离
-- **P6** 资源锁清理 / Run 持久化 / 共享 Memory
+- **P5 验证缺口**：真实模型 Planner/Verifier benchmark、并行写隔离的大规模压测
+- **P6** 资源锁清理 / Run 持久化与恢复 / Multi-Agent 共享 Memory（Worker 产候选、Supervisor 集中写）/ 专项 Agent MemoryProfile
 
-P2/P3/P4 都采用保守失败：压缩失败不替换 History，Memory 检索失败不阻断对话，
-Judge/治理链失败宁可不写长期 Memory，最终越过 hard limit 才抛 `ContextOverflowError`，
-绝不静默截断历史。
+P2/P3/P4/P5 都采用保守失败：压缩失败不替换 History，Memory 检索失败不阻断对话，
+Judge/治理链失败宁可不写长期 Memory，Planner/Verifier 失败退化/放行不卡编排，
+最终越过 hard limit 才抛 `ContextOverflowError`，绝不静默截断历史。
 
 ## 安全说明
 

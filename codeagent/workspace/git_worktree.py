@@ -1,0 +1,95 @@
+"""GitWorktreeWorkspaceManager：每个 Worker 一个 git worktree + 分支。
+
+所有 git 调用走 asyncio.to_thread —— 子进程是阻塞 I/O，留在事件循环里会卡住
+所有并发 AgentRun（V1 §6.1）。合并由 MasterRuntime 负责，这里只管建/删 worktree。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import shutil
+import subprocess
+from pathlib import Path
+
+from codeagent.infra.ids import new_id
+from codeagent.workspace.context import WorkspaceContext
+
+
+class GitWorktreeError(RuntimeError):
+    pass
+
+
+def _run_git(root: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        raise GitWorktreeError(
+            f"git {' '.join(args)} 失败 (exit {proc.returncode}): {proc.stderr.strip()}"
+        )
+    return proc.stdout.strip()
+
+
+class GitWorktreeWorkspaceManager:
+    def __init__(self, repo_root: Path, worktrees_dir: Path) -> None:
+        self._repo = Path(repo_root).resolve()
+        self._dir = Path(worktrees_dir).resolve()
+
+    @property
+    def isolated(self) -> bool:
+        return True
+
+    @property
+    def repo_root(self) -> Path:
+        return self._repo
+
+    def base_branch(self) -> str:
+        return _run_git(self._repo, "rev-parse", "--abbrev-ref", "HEAD")
+
+    async def create(self, run_id: str) -> WorkspaceContext:
+        worktree_id = new_id("wt")
+        branch = f"codeagent/{run_id}"
+        path = self._dir / worktree_id
+        await asyncio.to_thread(self._create_sync, path, branch)
+        return WorkspaceContext(
+            root=path.resolve(),
+            worktree_id=worktree_id,
+            branch_name=branch,
+            is_isolated=True,
+        )
+
+    def _create_sync(self, path: Path, branch: str) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        _run_git(self._repo, "worktree", "add", "-b", branch, str(path), "HEAD")
+
+    async def cleanup(self, workspace: WorkspaceContext, *, keep: bool = False) -> None:
+        if not workspace.is_isolated or keep:
+            return
+        await asyncio.to_thread(self._cleanup_sync, workspace)
+
+    def _cleanup_sync(self, workspace: WorkspaceContext) -> None:
+        try:
+            _run_git(self._repo, "worktree", "remove", "--force", str(workspace.root))
+        except GitWorktreeError:
+            # worktree 已被移除或路径异常：兜底直接删目录 + prune。
+            shutil.rmtree(workspace.root, ignore_errors=True)
+            try:
+                _run_git(self._repo, "worktree", "prune")
+            except GitWorktreeError:
+                pass
+        if workspace.branch_name:
+            try:
+                _run_git(self._repo, "branch", "-D", workspace.branch_name)
+            except GitWorktreeError:
+                pass
+
+    async def merge(self, workspace: WorkspaceContext) -> None:
+        """把 Worker 分支合并回 base。冲突时抛 GitWorktreeError，不自动解冲突。"""
+        if not workspace.branch_name:
+            return
+        await asyncio.to_thread(
+            _run_git, self._repo, "merge", "--no-edit", workspace.branch_name
+        )

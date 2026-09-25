@@ -113,7 +113,7 @@ evidence_refs / memory_candidates。Worker 的过程细节通过 `EvidenceRef` �
 | P2 | Turn 状态机 + Compaction 重写 + TaskCheckpoint | ✅ 已完成 |
 | P3 | 本地 Durable Memory 最小闭环 | ✅ 已完成 |
 | P4 | Memory 写入治理 + 检索质量 | ✅ 已完成 |
-| P5 | Multi-Agent 执行骨架 + Workspace 隔离 | ⬜ |
+| P5 | Multi-Agent 执行骨架 + Workspace 隔离 | ✅ 已完成（核心骨架） |
 | P6 | 资源锁清理 / Run 持久化 / 共享 Memory | ⬜ |
 
 单人开发的串行顺序建议 **P0→P1→P2→P3→P5→P6→P4**：P3 很小且立刻带来
@@ -217,6 +217,14 @@ Semaphore / `TaskGraph` DAG / `LocalVerifier` + `GlobalVerifier` /
 `StepScheduler` 不要按"波次"跑。并行文档 §10 的 `execute_ready_steps(steps)`
 是一次一层、层间有 barrier，长短分支混在一起时会白等。改成 pending-set 循环：
 每有一个 Step 完成就重算 ready 集合并立刻派发。
+
+✅ 已完成（核心骨架）：`orchestration/`（`task_graph`/`planner`/`step_scheduler`/
+`global_verifier`/`master_runtime`/`master_session`）、`agent/registry.py`、
+`runtime/agent_runtime.py`+`local_verifier.py`、`workspace/manager.py`+`git_worktree.py`；
+worktree 隔离与并行同期（非 git 回退只读并行+写串行）、pending-set 增量派发、
+不用 TaskGroup 改 `asyncio.wait`、合并/cleanup 所有权在 MasterRuntime。Planner/Verifier
+可注入（LLM 实现 + Fake），验收测试见 `tests/test_task_graph.py`、`test_step_scheduler.py`、
+`test_agent_runtime.py`、`test_workspace_manager.py`、`test_master_runtime.py`。
 
 ### P6 收尾
 

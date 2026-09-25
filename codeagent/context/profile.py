@@ -53,6 +53,10 @@ class ContextProfile:
     memory_judge_max_retries: int = 1
     memory_prefilter_max_bytes: int = 16 * 1024
 
+    # Multi-Agent 编排（P5）
+    agent_max_concurrency: int = 2
+    master_max_replans: int = 1
+
     # Tool 结果治理（P1）
     # tool 边界硬上限：超过这个数一律 offload 到 artifact
     max_tool_result_tokens: int = 6_000
