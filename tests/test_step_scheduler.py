@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import cast
 
 from codeagent.agent.models import AgentDefinition, AgentRunResult
 from codeagent.agent.registry import AgentRegistry
 from codeagent.agent.run import AgentRun
 from codeagent.infra.cancellation import CancellationToken
+from codeagent.orchestration.integration_coordinator import (
+    IntegrationCoordinator,
+    IntegrationOutcome,
+)
 from codeagent.orchestration.step_scheduler import StepScheduler
 from codeagent.orchestration.task_graph import Step, TaskGraph
-from codeagent.runtime.agent_runtime import WorkerRun
+from codeagent.runtime.agent_runtime import AgentRuntime, WorkerRun
 from codeagent.runtime.local_verifier import VerificationResult
 from codeagent.workspace.context import WorkspaceContext
 
@@ -83,6 +88,48 @@ async def test_pending_set_no_barrier_between_branches():
     result = await _scheduler(runtime, max_concurrency=4).run(graph, session_id="s")
     assert result.completed == {"a", "b", "c", "d"}
     assert runtime.completion_order.index("d") < runtime.completion_order.index("b")
+
+
+async def test_dependent_dispatched_only_after_predecessor_integrated():
+    """核心修复：后继 Step 只有在前驱 **integrated**（并回 base）之后才派发。
+
+    否则后继 worktree 从旧 HEAD 切出、看不到前驱改动 —— 即使没有 git 冲突也在过期代码上工作。
+    这里用事件序列断言:integrate(a) 必须发生在 run(b) 之前。
+    """
+    events: list[tuple[str, str]] = []
+
+    class OrderRuntime:
+        async def run(self, definition, step, *, session_id, cancellation=None, trace_id=None):
+            events.append(("run", step.id))
+            run = AgentRun.create(
+                definition, session_id=session_id, workspace=WorkspaceContext.local(Path("."))
+            )
+            return WorkerRun(
+                step_id=step.id,
+                run=run,
+                result=AgentRunResult.success(run.run_id, step.id),
+                workspace=run.workspace,
+                verification=VerificationResult(ok=True),
+            )
+
+    class OrderCoordinator:
+        async def integrate(self, worker: WorkerRun) -> IntegrationOutcome:
+            events.append(("integrate", worker.step_id))
+            return IntegrationOutcome(integrated=True, branch=None)
+
+    scheduler = StepScheduler(
+        agent_runtime=cast(AgentRuntime, OrderRuntime()),
+        agent_registry=AgentRegistry(default=_DEFN),
+        max_concurrency=4,
+        integration_coordinator=cast(IntegrationCoordinator, OrderCoordinator()),
+    )
+    graph = TaskGraph(
+        [Step("a", "default", "A"), Step("b", "default", "B", dependencies=frozenset({"a"}))]
+    )
+    result = await scheduler.run(graph, session_id="s")
+
+    assert result.integrated == {"a", "b"}
+    assert events == [("run", "a"), ("integrate", "a"), ("run", "b"), ("integrate", "b")]
 
 
 async def test_failure_blocks_dependents():

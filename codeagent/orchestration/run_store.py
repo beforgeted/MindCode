@@ -31,7 +31,7 @@ _T = TypeVar("_T")
 @dataclass(frozen=True, slots=True)
 class StepOutcome:
     step_id: str
-    status: str  # "completed" | "failed"
+    status: str  # "integrated" | "failed"（Phase 1；executed/verified/committed 预留）
     summary: str = ""
     files: tuple[FileState, ...] = ()
     evidence_refs: tuple[EvidenceRef, ...] = ()
@@ -39,8 +39,13 @@ class StepOutcome:
     merged: bool = False
 
     @property
+    def integrated(self) -> bool:
+        return self.status == "integrated"
+
+    @property
     def completed(self) -> bool:
-        return self.status == "completed"
+        # 兼容旧语义;现以 integrated 为准（已并回 base 才算真正完成）。
+        return self.status in ("integrated", "completed")
 
 
 @dataclass(frozen=True, slots=True)

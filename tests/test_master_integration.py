@@ -111,7 +111,9 @@ async def test_merge_conflict_aborts_and_keeps_base_clean(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_repo(repo)
-    config = _config(repo)  # agent_max_concurrency=1，串行确定顺序
+    # max_replans=0：冲突即终态,便于稳定观察"abort 后 base 干净";否则会 replan 掩盖冲突。
+    config = _config(repo)
+    config = replace(config, profile=replace(config.profile, master_max_replans=0))
 
     client = StubLlmClient(
         [

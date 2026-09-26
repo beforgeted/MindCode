@@ -91,7 +91,7 @@ async def test_run_store_persists_and_loads(tmp_path: Path):
         "mrun_1",
         StepOutcome(
             step_id="a",
-            status="completed",
+            status="integrated",
             summary="done a",
             files=(FileState("a.py", FileChangeKind.CREATED),),
             branch_name="w/a",
@@ -101,7 +101,7 @@ async def test_run_store_persists_and_loads(tmp_path: Path):
     assert record is not None
     assert record.task == "做 A 再做 B"
     assert {s.id for s in record.graph.steps} == {"a", "b"}
-    assert record.outcomes["a"].completed
+    assert record.outcomes["a"].integrated
     assert record.outcomes["a"].files[0].path == "a.py"
     assert await store.load_run("missing") is None
 
@@ -126,7 +126,7 @@ async def test_resume_skips_completed_steps(tmp_path: Path):
         "mrun_x",
         StepOutcome(
             step_id="a",
-            status="completed",
+            status="integrated",
             summary="a",
             files=(FileState("a.py", FileChangeKind.CREATED),),
         ),

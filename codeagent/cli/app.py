@@ -126,24 +126,25 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
     final = await master.run(
         goal, session_id=session.session_id, resume_master_run_id=resume_id
     )
-    print(f"\n[任务{'已接受' if final.accepted else '未接受'}] {final.reason}")
-    if final.accepted and not final.integrated:
-        print("[注意] 验收通过但存在合并冲突，改动未完整落回 base，需人工处理")
-    print(f"master_run_id: {final.master_run_id}（可用 /task --resume {final.master_run_id} 恢复）")
+    # 只呈现任务级结果：integrated 全绿才算完成;冲突/分支属内部细节,不让用户处理。
+    if final.integrated:
+        print(f"\n[任务完成] {final.reason}")
+    else:
+        print(f"\n[任务未完成] {final.reason or '内部集成未通过'}")
     sched = final.scheduler
     if sched is not None:
         print(
-            f"Step: 完成 {len(sched.completed)} / 失败 {len(sched.failed)} / "
+            f"Step: 已集成 {len(sched.integrated)} / 失败 {len(sched.failed)} / "
             f"阻塞 {len(sched.blocked)}，最大并行 {sched.max_parallel}"
         )
-    if final.merged_branches:
-        print(f"已合并分支: {', '.join(final.merged_branches)}")
-    if final.merge_conflicts:
-        print(f"合并冲突（需人工处理）: {'; '.join(final.merge_conflicts)}")
     if final.files:
         print("改动文件:")
         for state in final.files:
             print(f"  {state.change}: {state.path}")
+    # 调试信息（非用户待办）：内部集成冲突/分支,仅供排查。
+    if final.merge_conflicts:
+        print(f"[调试] 内部集成冲突: {'; '.join(final.merge_conflicts)}")
+    print(f"[调试] master_run_id={final.master_run_id}（未完成可 /task --resume 续跑）")
 
 
 async def run_repl(config: AppConfig) -> int:

@@ -1,7 +1,11 @@
-"""MasterRuntime：编排闭环 plan → schedule → verify →（replan）→ merge → cleanup。
+"""MasterRuntime：编排闭环 plan → (schedule+integrate) → verify →（replan）→ cleanup。
 
-合并与 cleanup 的所有权都在这里（V1 §7.1）：Worker 分支在**验收通过后**才合并回 base，
-worktree 在合并之后才回收；失败的 Worker 默认保留 worktree 作 evidence。
+集成不再是末尾的一次性大合并：它已被编进 StepScheduler 的执行环（验收即串行集成,
+后继只有在前驱 INTEGRATED 后才派发,见 step_scheduler / integration_coordinator）。
+MasterRuntime 只负责：规划、驱动调度、集成后的全局验收与重规划、以及 cleanup。
+
+cleanup 所有权仍在这里：**已集成**的 worktree 才回收;未集成（失败/冲突）的保留作证据,
+也便于 resume。
 """
 
 from __future__ import annotations
@@ -20,9 +24,7 @@ from codeagent.orchestration.shared_memory import (
     SupervisorWriter,
 )
 from codeagent.orchestration.step_scheduler import SchedulerResult, StepScheduler
-from codeagent.orchestration.task_graph import TaskGraph
 from codeagent.runtime.agent_runtime import WorkerRun
-from codeagent.workspace.git_worktree import GitWorktreeError, GitWorktreeWorkspaceManager
 from codeagent.workspace.manager import WorkspaceManager
 
 
@@ -38,8 +40,7 @@ class FinalResult:
     merged_branches: tuple[str, ...] = ()
     merge_conflicts: tuple[str, ...] = ()
     replans: int = 0
-    # accepted 只反映各 Worker 的验收；integrated 还要求合并干净落回 base。
-    # 有合并冲突时 accepted 可能为 True 但 integrated 为 False（产物未真正集成）。
+    # accepted 反映全局验收；integrated 还要求全部 Step 已干净并回 base（无失败/冲突）。
     integrated: bool = True
 
 
@@ -85,7 +86,8 @@ class MasterRuntime:
             master_run_id = record.master_run_id
             task = record.task
             graph = record.graph
-            precompleted = {sid: o for sid, o in record.outcomes.items() if o.completed}
+            # 只跳过**已集成**的 Step；执行过但未集成的必须重跑（其分支可能已过期）。
+            precompleted = {sid: o for sid, o in record.outcomes.items() if o.integrated}
             skip = set(precompleted)
             await self._run_store.update_run_status(master_run_id, "running")
         else:
@@ -104,10 +106,13 @@ class MasterRuntime:
         replans = 0
         current_task = task
 
-        async def _checkpoint(step_id: str, worker: WorkerRun) -> None:
-            await self._run_store.record_step(master_run_id, _to_outcome(step_id, worker))
+        async def _checkpoint(step_id: str, worker: WorkerRun, integrated: bool) -> None:
+            await self._run_store.record_step(
+                master_run_id, _to_outcome(step_id, worker, integrated)
+            )
 
         while True:
+            # 调度内部已完成"验收即串行集成";返回时 integrated 集合即已并回 base 的 Step。
             result = await self._scheduler.run(
                 graph,
                 session_id=session_id,
@@ -116,6 +121,7 @@ class MasterRuntime:
                 skip=frozenset(skip),
                 on_step_complete=_checkpoint,
             )
+            # 全局验收发生在集成之后,针对真实集成产物（此处 result 的 failed 已含集成失败）。
             verdict = await self._verifier.verify(current_task, graph, result)
             if verdict.accept or replans >= self._max_replans:
                 break
@@ -130,19 +136,13 @@ class MasterRuntime:
                 graph=graph,
                 status="running",
             )
-            skip = set()  # 重规划后图已变，不再沿用旧 skip 集合
+            skip = set()  # 重规划后图已变,不再沿用旧 skip 集合
 
         assert result is not None and verdict is not None
-        merged, conflicts = await self._merge(graph, result, accepted=verdict.accept)
-        for step_id in _merged_step_ids(graph, result, merged):
-            await self._run_store.mark_merged(
-                master_run_id, step_id, result.workers[step_id].workspace.branch_name or ""
-            )
         await self._cleanup(result)
         # Supervisor 集中 staging Worker 产出的 MemoryCandidate（Worker 从不直写）。
         await self._memory_writer.collect_and_stage(result.workers)
 
-        # 聚合本次跑的 Worker 与恢复时跳过的已完成 Step。
         files: list[FileState] = []
         evidence: list[EvidenceRef] = []
         for worker in result.workers.values():
@@ -152,8 +152,9 @@ class MasterRuntime:
             files.extend(outcome.files)
             evidence.extend(outcome.evidence_refs)
 
+        integrated_ok = verdict.accept and not result.failed and not result.conflicts
         await self._run_store.update_run_status(
-            master_run_id, "success" if verdict.accept else "failed"
+            master_run_id, "success" if integrated_ok else "failed"
         )
 
         return FinalResult(
@@ -164,69 +165,29 @@ class MasterRuntime:
             scheduler=result,
             files=tuple(files),
             evidence_refs=tuple(evidence),
-            merged_branches=tuple(merged),
-            merge_conflicts=tuple(conflicts),
+            merged_branches=tuple(result.integrated_branches),
+            merge_conflicts=tuple(result.conflicts),
             replans=replans,
-            integrated=verdict.accept and not conflicts,
+            integrated=integrated_ok,
         )
-
-    async def _merge(
-        self, graph: TaskGraph, result: SchedulerResult, *, accepted: bool
-    ) -> tuple[list[str], list[str]]:
-        merged: list[str] = []
-        conflicts: list[str] = []
-        if not accepted or not isinstance(self._wsm, GitWorktreeWorkspaceManager):
-            return merged, conflicts
-        # 按 graph 声明顺序合并已完成的 Worker 分支。
-        for step in graph.steps:
-            worker = result.workers.get(step.id)
-            if worker is None or step.id not in result.completed:
-                continue
-            if not worker.workspace.is_isolated or not worker.workspace.branch_name:
-                continue
-            try:
-                # 先把 worktree 里的改动提交到分支，否则 merge 带不回 base。
-                committed = await self._wsm.commit(worker.workspace)
-                if not committed:
-                    continue
-                await self._wsm.merge(worker.workspace)
-                merged.append(worker.workspace.branch_name)
-            except GitWorktreeError as exc:
-                conflicts.append(f"{worker.workspace.branch_name}: {exc}")
-                self._metrics.incr("master.merge_conflicts")
-                break  # 冲突即停，交由人工处理，不自动解冲突。
-        return merged, conflicts
 
     async def _cleanup(self, result: SchedulerResult) -> None:
         for step_id, worker in result.workers.items():
-            keep = step_id in result.failed  # 失败的 worktree 保留作 evidence。
+            # 已集成的才回收;未集成（失败/冲突）保留 worktree 与分支作证据、便于 resume。
+            keep = step_id not in result.integrated
             try:
                 await self._wsm.cleanup(worker.workspace, keep=keep)
             except Exception:
                 self._metrics.incr("master.cleanup_failures")
 
 
-def _to_outcome(step_id: str, worker: WorkerRun) -> StepOutcome:
-    ok = worker.verification.ok and worker.result.ok
+def _to_outcome(step_id: str, worker: WorkerRun, integrated: bool) -> StepOutcome:
     return StepOutcome(
         step_id=step_id,
-        status="completed" if ok else "failed",
+        status="integrated" if integrated else "failed",
         summary=worker.result.summary,
         files=worker.result.files,
         evidence_refs=worker.result.evidence_refs,
         branch_name=worker.workspace.branch_name,
-        merged=False,
+        merged=integrated,
     )
-
-
-def _merged_step_ids(
-    graph: TaskGraph, result: SchedulerResult, merged_branches: list[str]
-) -> list[str]:
-    """把已合并的分支名映射回 step_id，供 RunStore 标记 merged。"""
-    branches = set(merged_branches)
-    out: list[str] = []
-    for step in graph.steps:
-        worker = result.workers.get(step.id)
-        if worker is not None and worker.workspace.branch_name in branches:
-            out.append(step.id)
-    return out

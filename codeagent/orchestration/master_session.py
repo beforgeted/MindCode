@@ -28,6 +28,7 @@ from codeagent.orchestration.global_verifier import (
     LlmGlobalVerifier,
     NoFailureVerifier,
 )
+from codeagent.orchestration.integration_coordinator import IntegrationCoordinator
 from codeagent.orchestration.master_runtime import FinalResult, MasterRuntime
 from codeagent.orchestration.planner import LlmPlanner, Planner
 from codeagent.orchestration.run_store import RunStore
@@ -84,6 +85,7 @@ async def build_master(
         agent_registry=registry,
         max_concurrency=config.profile.agent_max_concurrency,
         isolated=wsm.isolated,
+        integration_coordinator=IntegrationCoordinator(wsm, metrics=metrics),
         metrics=metrics,
     )
     memory_writer: SupervisorWriter = (
