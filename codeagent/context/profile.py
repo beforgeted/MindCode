@@ -53,9 +53,11 @@ class ContextProfile:
     memory_judge_max_retries: int = 1
     memory_prefilter_max_bytes: int = 16 * 1024
 
-    # Multi-Agent 编排（P5）
+    # Multi-Agent 编排（P5/P6）
     agent_max_concurrency: int = 2
     master_max_replans: int = 1
+    # 集成期检测到"推测执行过期"时,在最新基线上重跑的次数上限（P6 Phase 2）
+    agent_max_reruns: int = 2
 
     # Tool 结果治理（P1）
     # tool 边界硬上限：超过这个数一律 offload 到 artifact

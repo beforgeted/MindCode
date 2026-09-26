@@ -1,19 +1,22 @@
-"""IntegrationCoordinator：把已验收的 Worker 分支**串行、确定性**地集成回 base（Phase 1）。
+"""IntegrationCoordinator：把已验收的 Worker 分支串行、确定性地集成回 base，
+并检测"推测执行是否过期"（Phase 1 + Phase 2）。
 
-为什么要有它：原来所有 Worker 从同一旧 base 并行起步、末尾一次性大合并 —— 导致 DAG
-后继在派发时看不到前驱改动（后继 worktree 从旧 HEAD 切出）。改成"验收即集成"后,后继
-只有在前驱 INTEGRATED 后才派发,其 worktree 自然从含前驱改动的最新 HEAD 切出。
+Phase 1：验收即集成,后继只有在前驱 INTEGRATED 后才派发（消除依赖型后继的过期）。
+Phase 2：并行兄弟可能都从旧 base 起步 —— A 先集成后 B 仍基于旧版本。集成 B 时:
+- 集成 HEAD 未动过（== B 的 base_revision）→ 直接合并（clean）。
+- HEAD 已动、且期间改动文件与 B 的**读集∪写集**无重叠、且 B 没用过 run_command（读集已知）
+  → 合并(改动不相交,通常 clean)。
+- 有重叠 / 读集未知 / 合并冲突 → 判 **stale**,交回 StepScheduler 在最新 HEAD 上重跑。
 
-职责边界:只负责"把一个 Worker 分支并入 base 并报告结果"。派发门控、顺序选择在
-StepScheduler;冲突时的重跑收敛/Integrator 兜底留待 Phase 2/3。
+关键:读写重叠不仅看 write/write（git 能发现),还看 read/write —— B 读过的文件被 A 改了,
+即使 git 不冲突,B 的结果也可能基于过期行为,必须重跑。这是比 git 冲突更隐蔽的一类过期。
 
-- 隔离(git worktree):commit worker 分支 → merge 回 base;冲突已由 git_worktree.merge
-  内部 `git merge --abort` 回滚,base 保持干净,这里如实报冲突。
-- 非隔离(共享 root):改动已直接落在共享工作区(由 StepScheduler 写锁串行化),集成即 no-op。
+合并冲突由 git_worktree.merge 内部 `git merge --abort` 回滚,base 始终保持干净一致。
 """
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 
 from codeagent.infra.metrics import Metrics
@@ -21,12 +24,24 @@ from codeagent.runtime.agent_runtime import WorkerRun
 from codeagent.workspace.git_worktree import GitWorktreeError, GitWorktreeWorkspaceManager
 from codeagent.workspace.manager import WorkspaceManager
 
+# 会"读"工作区、但读集可枚举的工具;run_command 读集不可知 → 保守判可能重叠。
+_READ_TOOLS = {"read_file", "grep", "read_artifact"}
+_UNKNOWN_READ_TOOLS = {"run_command"}
+
 
 @dataclass(frozen=True, slots=True)
 class IntegrationOutcome:
-    integrated: bool
+    status: str  # "integrated" | "stale" | "failed"
     branch: str | None = None
     conflict: str | None = None
+
+    @property
+    def integrated(self) -> bool:
+        return self.status == "integrated"
+
+    @property
+    def stale(self) -> bool:
+        return self.status == "stale"
 
 
 class IntegrationCoordinator:
@@ -38,22 +53,66 @@ class IntegrationCoordinator:
 
     async def integrate(self, worker: WorkerRun) -> IntegrationOutcome:
         ws = worker.workspace
-        # 非隔离 / 无分支 / 无 git 管理器:改动已在共享 base,集成是 no-op。
-        if (
-            not ws.is_isolated
-            or not ws.branch_name
-            or not isinstance(self._wsm, GitWorktreeWorkspaceManager)
+        wsm = self._wsm
+        if not ws.is_isolated or not ws.branch_name or not isinstance(
+            wsm, GitWorktreeWorkspaceManager
         ):
-            return IntegrationOutcome(integrated=True, branch=ws.branch_name)
+            # 非隔离 / 无分支 / 无 git 管理器:改动已在共享 base,集成是 no-op。
+            return IntegrationOutcome("integrated", branch=ws.branch_name)
+
+        committed = await wsm.commit(ws)
+        if not committed:
+            return IntegrationOutcome("integrated", branch=ws.branch_name)  # 无改动,无需合并
+
+        # Phase 2：集成 HEAD 是否在本 Worker 启动后动过?动过则查过期。
+        if ws.base_revision:
+            head = await wsm.head()
+            if head != ws.base_revision:
+                intervening = await wsm.changed_files(ws.base_revision, head)
+                if intervening:
+                    write_set = await wsm.branch_files(ws.base_revision, ws.branch_name)
+                    read_set, reads_unknown = _read_info(worker)
+                    overlap = intervening & (write_set | read_set)
+                    if overlap or reads_unknown:
+                        self._metrics.incr("integration.stale")
+                        return IntegrationOutcome("stale", branch=ws.branch_name)
+
         try:
-            committed = await self._wsm.commit(ws)
-            if committed:
-                await self._wsm.merge(ws)  # 冲突时内部已 merge --abort,base 保持干净
-                self._metrics.incr("integration.merged")
-            return IntegrationOutcome(integrated=True, branch=ws.branch_name)
+            await wsm.merge(ws)  # 冲突时内部已 merge --abort,base 保持干净
+            self._metrics.incr("integration.merged")
+            return IntegrationOutcome("integrated", branch=ws.branch_name)
         except GitWorktreeError as exc:
+            # 走到这里说明 overlap 检测没拦住却仍冲突(写写)：判 stale,交调度器在最新 HEAD 重跑。
             self._metrics.incr("integration.conflicts")
-            return IntegrationOutcome(integrated=False, branch=ws.branch_name, conflict=str(exc))
+            return IntegrationOutcome("stale", branch=ws.branch_name, conflict=str(exc))
+
+    async def discard(self, worker: WorkerRun) -> None:
+        """丢弃一个过期 Worker 的 worktree/分支（重跑前清理,避免泄漏）。"""
+        if self._wsm is None:
+            return
+        try:
+            await self._wsm.cleanup(worker.workspace, keep=False)
+        except Exception:
+            self._metrics.incr("integration.discard_failures")
+
+
+def _norm(path: str) -> str:
+    return unicodedata.normalize("NFKC", path).strip().replace("\\", "/").lstrip("./")
+
+
+def _read_info(worker: WorkerRun) -> tuple[set[str], bool]:
+    """从 Worker 的工具调用里提取读集;用过 run_command 则读集不可知（返回 unknown=True）。"""
+    reads: set[str] = set()
+    unknown = False
+    for run in worker.run.context.tool_runs:
+        name = run.call.name
+        if name in _UNKNOWN_READ_TOOLS:
+            unknown = True
+        elif name in _READ_TOOLS:
+            path = run.call.arguments.get("path")
+            if isinstance(path, str) and path:
+                reads.add(_norm(path))
+    return reads, unknown
 
 
 __all__ = ["IntegrationCoordinator", "IntegrationOutcome"]

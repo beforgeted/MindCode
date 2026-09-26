@@ -86,6 +86,7 @@ async def build_master(
         max_concurrency=config.profile.agent_max_concurrency,
         isolated=wsm.isolated,
         integration_coordinator=IntegrationCoordinator(wsm, metrics=metrics),
+        max_reruns=config.profile.agent_max_reruns,
         metrics=metrics,
     )
     memory_writer: SupervisorWriter = (

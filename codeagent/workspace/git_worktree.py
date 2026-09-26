@@ -49,21 +49,43 @@ class GitWorktreeWorkspaceManager:
     def base_branch(self) -> str:
         return _run_git(self._repo, "rev-parse", "--abbrev-ref", "HEAD")
 
+    async def head(self) -> str:
+        """当前集成 HEAD（git sha）。"""
+        return await asyncio.to_thread(_run_git, self._repo, "rev-parse", "HEAD")
+
+    async def changed_files(self, from_rev: str, to_rev: str = "HEAD") -> set[str]:
+        """from_rev..to_rev 之间改动的文件（repo 相对路径）。"""
+        return await asyncio.to_thread(self._diff_names, from_rev, to_rev)
+
+    async def branch_files(self, base_rev: str, branch: str) -> set[str]:
+        """branch 相对 base_rev 改动的文件（Worker 的写集,权威来源）。"""
+        return await asyncio.to_thread(self._diff_names, base_rev, branch)
+
+    def _diff_names(self, a: str, b: str) -> set[str]:
+        try:
+            out = _run_git(self._repo, "diff", "--name-only", a, b)
+        except GitWorktreeError:
+            return set()
+        return {line.strip() for line in out.splitlines() if line.strip()}
+
     async def create(self, run_id: str) -> WorkspaceContext:
         worktree_id = new_id("wt")
         branch = f"codeagent/{run_id}"
         path = self._dir / worktree_id
-        await asyncio.to_thread(self._create_sync, path, branch)
+        base_revision = await asyncio.to_thread(self._create_sync, path, branch)
         return WorkspaceContext(
             root=path.resolve(),
             worktree_id=worktree_id,
             branch_name=branch,
             is_isolated=True,
+            base_revision=base_revision,
         )
 
-    def _create_sync(self, path: Path, branch: str) -> None:
+    def _create_sync(self, path: Path, branch: str) -> str:
         self._dir.mkdir(parents=True, exist_ok=True)
+        base_revision = _run_git(self._repo, "rev-parse", "HEAD")
         _run_git(self._repo, "worktree", "add", "-b", branch, str(path), "HEAD")
+        return base_revision
 
     async def cleanup(self, workspace: WorkspaceContext, *, keep: bool = False) -> None:
         if not workspace.is_isolated or keep:

@@ -26,6 +26,8 @@ class WorkspaceContext:
     worktree_id: str
     branch_name: str | None = None
     is_isolated: bool = False
+    # 该 worktree 创建时的 base HEAD（git sha）。用于集成期检测"推测执行是否过期"（Phase 2）。
+    base_revision: str | None = None
 
     @classmethod
     def local(cls, root: Path | str) -> WorkspaceContext:

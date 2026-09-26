@@ -52,6 +52,7 @@ class StepScheduler:
         max_concurrency: int = 2,
         isolated: bool = True,
         integration_coordinator: IntegrationCoordinator | None = None,
+        max_reruns: int = 2,
         metrics: Metrics | None = None,
     ) -> None:
         self._runtime = agent_runtime
@@ -59,6 +60,7 @@ class StepScheduler:
         self._max_concurrency = max(1, max_concurrency)
         self._isolated = isolated
         self._coordinator = integration_coordinator or IntegrationCoordinator()
+        self._max_reruns = max(0, max_reruns)
         self._metrics = metrics or Metrics()
 
     async def run(
@@ -84,6 +86,7 @@ class StepScheduler:
         running: dict[asyncio.Task[WorkerRun], str] = {}
         pending: list[str] = []  # 已验收、待集成的 step_id（确定序消费）
         dispatched: set[str] = set(skip)
+        rerun_left: dict[str, int] = {}  # 过期重跑预算（Phase 2）
         max_parallel = 0
 
         async def _notify(step_id: str, worker: WorkerRun, ok: bool) -> None:
@@ -115,11 +118,21 @@ class StepScheduler:
                     integrated.add(step_id)
                     if outcome.branch:
                         integrated_branches.append(outcome.branch)
+                    await _notify(step_id, worker, True)
+                elif outcome.stale and rerun_left.get(step_id, self._max_reruns) > 0:
+                    # 推测执行过期：丢弃过期 worktree,在最新 HEAD 上重跑（收敛,用户无感）
+                    rerun_left[step_id] = rerun_left.get(step_id, self._max_reruns) - 1
+                    self._metrics.incr("scheduler.reruns")
+                    await self._coordinator.discard(worker)
+                    dispatched.discard(step_id)
+                    completed.discard(step_id)
+                    workers.pop(step_id, None)
                 else:
+                    # 集成失败或重跑预算耗尽 → 该步失败,阻断其后继
                     failed.add(step_id)
                     if outcome.conflict:
                         conflicts.append(f"{outcome.branch}: {outcome.conflict}")
-                await _notify(step_id, worker, outcome.integrated)
+                    await _notify(step_id, worker, False)
                 continue
 
             # ③ 无在跑、无待集成 → 结束

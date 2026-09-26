@@ -115,7 +115,10 @@ async def test_dependent_dispatched_only_after_predecessor_integrated():
     class OrderCoordinator:
         async def integrate(self, worker: WorkerRun) -> IntegrationOutcome:
             events.append(("integrate", worker.step_id))
-            return IntegrationOutcome(integrated=True, branch=None)
+            return IntegrationOutcome(status="integrated", branch=None)
+
+        async def discard(self, worker: WorkerRun) -> None:
+            pass
 
     scheduler = StepScheduler(
         agent_runtime=cast(AgentRuntime, OrderRuntime()),
