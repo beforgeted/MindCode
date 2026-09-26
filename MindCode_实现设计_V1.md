@@ -114,7 +114,7 @@ evidence_refs / memory_candidates。Worker 的过程细节通过 `EvidenceRef` �
 | P3 | 本地 Durable Memory 最小闭环 | ✅ 已完成 |
 | P4 | Memory 写入治理 + 检索质量 | ✅ 已完成 |
 | P5 | Multi-Agent 执行骨架 + Workspace 隔离 | ✅ 已完成 |
-| P6 | 资源锁清理 / Run 持久化 / 共享 Memory | ⬜ |
+| P6 | 资源锁清理 / Run 持久化 / 共享 Memory | ✅ 已完成 |
 
 单人开发的串行顺序建议 **P0→P1→P2→P3→P5→P6→P4**：P3 很小且立刻带来
 `/memory` 的用户价值，P5 是最大的能力跃迁，P4 属于质量加固可以后置。
@@ -229,11 +229,34 @@ Planner/Verifier 可注入（真实模型走 LLM 实现、stub 走确定性实�
 `test_workspace_manager.py`、`test_master_runtime.py`、`test_orchestration_llm.py`、
 `test_master_integration.py`（真实 git + ReActEngine 端到端并行写→合并）。
 
-### P6 收尾
+### P6 收尾（已完成）
 
 `ResourceLockManager` 锁表清理、Run 持久化与恢复、Multi-Agent 共享 Memory
 （Worker 只产 `MemoryCandidate`，由 Supervisor 集中写）、专项 Agent 的
 `MemoryProfile`。
+
+- **锁表清理**：`tool/resource_lock.py` 引用计数驱逐——每个 key 在 `await acquire()`
+  前 `+1`、释放后 `-1`，计数归零且锁空闲即删除，长跑进程不再泄漏。
+- **Run 持久化/恢复**（深度=跳过已完成 Step）：`orchestration/run_store.py`
+  （`SqliteRunStore`/`NullRunStore`）持久化 **planned graph 的 JSON** 与每个
+  `step_outcome`。`MasterRuntime.run(..., resume_master_run_id=...)` 重建图、跳过已完成
+  Step 只重跑未完成的；`StepScheduler.run` 增 `skip` 与 `on_step_complete`（每步完成即
+  落库，崩溃安全）。CLI：`/task --resume <mrun_id>`。**跨进程 worktree/branch 的完整崩溃
+  恢复不在本期范围**（已完成 Step 视为已集成，不再重合并）。
+- **共享 Memory**：`orchestration/shared_memory.py` 的 `SupervisorMemoryWriter` 在 merge 后
+  汇总各 Worker 的 `AgentRunResult.memory_candidates`，按 `candidate_key` 去重、按产出
+  Agent 的 `MemoryProfile.writable_types` 过滤越界候选，集中 staging 到候选表
+  （`SqliteMemoryStore.stage_shared_candidates`，`INSERT OR IGNORE` 与 Session-End harvest
+  天然去重）。**Worker 绝不直写 PROJECT Memory**；promote 仍由既有 LLM Judge 治理链裁决。
+  Worker 候选来源经 `AgentRuntime.candidate_harvester`（可注入）产出，默认不注入。
+- **MemoryProfile**：`AgentDefinition.memory_profile` 描述 `readable_types` /
+  `writable_types` / `max_injection_tokens`（默认全放行）。读侧经
+  `ContextManager.prepare(memory_type_filter=, memory_injection_cap=)` +
+  `MemoryRetriever.retrieve(type_filter=)` 过滤与限额；写侧由 Supervisor 用
+  `writable_types` 丢弃越界候选。
+
+验收测试：`tests/test_resource_lock.py`、`test_run_store.py`、`test_shared_memory.py`，
+以及扩展的 `test_memory_context_integration.py`。
 
 ---
 
@@ -401,10 +424,10 @@ allowance 内，`ImagePayloadPruner` 跳过 `data is None` 的图片。
 
 一批 tool 需要多把锁时锁 key 全局排序后按序获取，否则必然死锁
 （并行文档 §20 自己也提了"需要考虑"）。持锁期间禁止调 LLM。
-锁表清理留到 P6。
+锁表清理已在 P6 完成（引用计数驱逐）。
 
 `SERIAL` 模式的处理是**整批退化为顺序执行**，而不是引入读写锁 ——
-简单且显然正确。
+简单且显然正确。锁表清理已在 P6 完成（引用计数驱逐，见 `tool/resource_lock.py`）。
 
 ---
 
@@ -446,14 +469,14 @@ allowance 内，`ImagePayloadPruner` 跳过 `data is None` 的图片。
 | `TurnIdPartitioner` 对没打 `turn_id` 的消息用启发式补 | 单 Agent 下够用 | P2/P5 前换成纯 `turn_id` 驱动 |
 | `ImagePayloadPruner` 裁掉 payload 后只留结构化占位，没有真的 vision 描述 | `summary` 字段已备好 | 接 vision summary 时只需填字段 |
 | `_tests_from()` 在归一化后的摘要上提取测试计数，可能漏 | 影响 `AgentRunResult.tests` 的完整性，不影响正确性 | P2 让 Normalizer 把结构化计数写进 `metadata` |
-| ResourceLockManager 锁表无限增长 | 长跑进程下是内存泄漏 | P6 |
+| ResourceLockManager 锁表无限增长 | 已在 P6 用引用计数驱逐修复 | ✅ 已完成 |
 
 ---
 
 ## 9. 当前状态
 
 ```
-30 tests passed
+120 tests passed
 ruff check: All checks passed
 pyright: 0 errors
 ```

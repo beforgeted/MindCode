@@ -22,6 +22,7 @@ from codeagent.evidence.event_store import RawEventStore
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
 from codeagent.llm.types import ModelConfig
+from codeagent.memory.governance_repository import MemoryGovernanceRepository
 from codeagent.orchestration.global_verifier import (
     GlobalVerifier,
     LlmGlobalVerifier,
@@ -29,6 +30,12 @@ from codeagent.orchestration.global_verifier import (
 )
 from codeagent.orchestration.master_runtime import FinalResult, MasterRuntime
 from codeagent.orchestration.planner import LlmPlanner, Planner
+from codeagent.orchestration.run_store import RunStore
+from codeagent.orchestration.shared_memory import (
+    NullSupervisorMemoryWriter,
+    SupervisorMemoryWriter,
+    SupervisorWriter,
+)
 from codeagent.orchestration.step_scheduler import StepScheduler
 from codeagent.runtime.agent_runtime import AgentRuntime
 from codeagent.runtime.local_verifier import LlmLocalVerifier, LocalVerifier, StatusLocalVerifier
@@ -49,6 +56,8 @@ async def build_master(
     planner: Planner | None = None,
     local_verifier: LocalVerifier | None = None,
     global_verifier: GlobalVerifier | None = None,
+    memory_store: MemoryGovernanceRepository | None = None,
+    run_store: RunStore | None = None,
 ) -> MasterRuntime:
     """装配 MasterRuntime。stub LLM 下 Verifier 用确定性实现，真实模型下用 LLM 实现。"""
     model_config = ModelConfig(
@@ -77,12 +86,19 @@ async def build_master(
         isolated=wsm.isolated,
         metrics=metrics,
     )
+    memory_writer: SupervisorWriter = (
+        SupervisorMemoryWriter(memory_store, metrics=metrics)
+        if memory_store is not None
+        else NullSupervisorMemoryWriter()
+    )
     return MasterRuntime(
         planner=planner or LlmPlanner(llm_client, model_config),
         scheduler=scheduler,
         global_verifier=gverif,
         workspace_manager=wsm,
         max_replans=config.profile.master_max_replans,
+        memory_writer=memory_writer,
+        run_store=run_store,
         metrics=metrics,
     )
 

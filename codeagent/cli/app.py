@@ -96,8 +96,21 @@ async def _handle_command(session: AgentSession, line: str, *, config, client) -
 
 
 async def _run_task(session: AgentSession, config: AppConfig, client, goal: str) -> None:
-    """P5 Multi-Agent：规划 → 并行 Worker → 验收 → 合并。复用当前活着的 session。"""
+    """P5/P6 Multi-Agent：规划 → 并行 Worker → 验收 → 合并。复用当前活着的 session。
+
+    `/task --resume <mrun_id>`：从 RunStore 恢复，跳过已完成 Step，只重跑未完成的。
+    """
     from codeagent.orchestration.master_session import build_master
+    from codeagent.orchestration.run_store import SqliteRunStore
+
+    resume_id: str | None = None
+    parts = goal.split()
+    if len(parts) >= 2 and parts[0] == "--resume":
+        resume_id = parts[1]
+        goal = goal[len("--resume") :].strip()[len(resume_id) :].strip()
+
+    run_store = SqliteRunStore(config.state_root / "runs.db")
+    await run_store.start()
 
     master = await build_master(
         config=config,
@@ -106,9 +119,14 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
         event_store=session.event_store,
         metrics=session.metrics,
         definition=session.definition,
+        memory_store=session.memory_store if session.memory_service.available else None,
+        run_store=run_store,
     )
-    final = await master.run(goal, session_id=session.session_id)
+    final = await master.run(
+        goal, session_id=session.session_id, resume_master_run_id=resume_id
+    )
     print(f"\n[任务{'已接受' if final.accepted else '未接受'}] {final.reason}")
+    print(f"master_run_id: {final.master_run_id}（可用 /task --resume {final.master_run_id} 恢复）")
     sched = final.scheduler
     if sched is not None:
         print(

@@ -17,6 +17,8 @@ from enum import StrEnum
 from codeagent.context.profile import ContextProfile
 from codeagent.evidence.models import EvidenceRef
 from codeagent.llm.types import ModelConfig
+from codeagent.memory.governance_models import MemoryCandidate
+from codeagent.memory.models import MemoryType
 
 
 class RunStatus(StrEnum):
@@ -29,6 +31,27 @@ class RunStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryProfile:
+    """专项 Agent 的 Memory 读写边界（P6）。
+
+    默认全放行——现有单 Agent 无需改动即向后兼容。空 tuple = 不设限。
+    """
+
+    # 该 Agent 检索时只注入这些类型的 Memory（空 = 全部可读）
+    readable_types: tuple[MemoryType, ...] = ()
+    # 该 Agent 能产出的候选类型（空 = 全部可写）；越界候选由 Supervisor 丢弃
+    writable_types: tuple[MemoryType, ...] = ()
+    # 覆盖 ContextProfile.max_memory_injection_tokens（None = 用 profile 默认）
+    max_injection_tokens: int | None = None
+
+    def can_read(self, type_: MemoryType) -> bool:
+        return not self.readable_types or type_ in self.readable_types
+
+    def can_write(self, type_: MemoryType) -> bool:
+        return not self.writable_types or type_ in self.writable_types
+
+
+@dataclass(frozen=True, slots=True)
 class AgentDefinition:
     id: str
     name: str
@@ -38,6 +61,7 @@ class AgentDefinition:
     max_react_iterations: int = 25
     max_reflection_count: int = 3
     context_profile: ContextProfile = field(default_factory=ContextProfile)
+    memory_profile: MemoryProfile = field(default_factory=MemoryProfile)
 
 
 class FileChangeKind(StrEnum):
@@ -88,8 +112,8 @@ class AgentRunResult:
     tests: tuple[TestState, ...] = ()
     open_issues: tuple[str, ...] = ()
     evidence_refs: tuple[EvidenceRef, ...] = ()
-    # P3/P4 挂载点：Worker 只产候选，不直接写 PROJECT Memory。
-    memory_candidates: tuple[object, ...] = ()
+    # P6：Worker 只产候选，不直接写 PROJECT Memory；由 Supervisor 集中 staging。
+    memory_candidates: tuple[MemoryCandidate, ...] = ()
     error: str | None = None
     iterations: int = 0
 

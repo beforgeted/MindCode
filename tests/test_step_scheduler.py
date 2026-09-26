@@ -17,7 +17,7 @@ _DEFN = AgentDefinition(id="default", name="D", system_prompt="")
 
 
 class FakeRuntime:
-    def __init__(self, *, delays=None, fail=frozenset()):
+    def __init__(self, *, delays=None, fail: set[str] | frozenset[str] = frozenset()):
         self._delays = delays or {}
         self._fail = fail
         self.active = 0

@@ -135,6 +135,20 @@ class SqliteMemoryStore:
             write=False,
         )
 
+    async def stage_shared_candidates(
+        self, candidates: tuple[MemoryCandidate, ...]
+    ) -> int:
+        """Supervisor 集中 staging Worker 候选（P6）。
+
+        与 Session-End harvest 走同一张候选表 + 同一 candidate_key，`INSERT OR IGNORE`
+        天然去重；不动 governance 游标（游标是 event-scan 的进度，与集中 staging 无关）。
+        """
+        if not candidates:
+            return 0
+        return await self._run(
+            lambda conn: self._stage_shared_candidates(conn, candidates)
+        )
+
     async def finalize_candidate(
         self,
         candidate_key: str,
@@ -417,6 +431,42 @@ class SqliteMemoryStore:
             (project_id, session_id),
         ).fetchone()
         return int(row["next_ordinal"]) if row else 0
+
+    def _stage_shared_candidates(
+        self,
+        conn: sqlite3.Connection,
+        candidates: tuple[MemoryCandidate, ...],
+    ) -> int:
+        staged = 0
+        for candidate in candidates:
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO memory_candidates(
+                    candidate_key, project_id, session_id, content, content_sha256,
+                    source, proposed_scope, proposed_type, evidence_json,
+                    source_event_ids_json, reason, extractor_version, contract_version,
+                    status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    candidate.candidate_key,
+                    candidate.project_id,
+                    candidate.session_id,
+                    candidate.content,
+                    candidate.content_sha256,
+                    str(candidate.source),
+                    str(candidate.proposed_scope),
+                    str(candidate.proposed_type),
+                    _dump_evidence(candidate.evidence_refs),
+                    json.dumps(list(candidate.source_event_ids)),
+                    candidate.reason,
+                    candidate.extractor_version,
+                    candidate.contract_version,
+                    str(candidate.status),
+                    candidate.created_at.isoformat(),
+                ),
+            )
+            if cursor.rowcount:
+                staged += 1
+        return staged
 
     def _stage_event_batch(
         self,

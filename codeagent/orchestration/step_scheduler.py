@@ -11,6 +11,7 @@ read_only Step 免锁 → 仍可并行。隔离（worktree）时各 Worker 各�
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from codeagent.agent.registry import AgentRegistry
@@ -52,10 +53,12 @@ class StepScheduler:
         session_id: str,
         cancellation: CancellationToken | None = None,
         trace_id: str | None = None,
+        skip: frozenset[str] | set[str] = frozenset(),
+        on_step_complete: Callable[[str, WorkerRun], Awaitable[None]] | None = None,
     ) -> SchedulerResult:
         semaphore = asyncio.Semaphore(self._max_concurrency)
         write_lock = asyncio.Lock()
-        completed: set[str] = set()
+        completed: set[str] = set(skip)  # 恢复：已完成的 Step 直接视为满足依赖，不重跑
         failed: set[str] = set()
         workers: dict[str, WorkerRun] = {}
         running: dict[asyncio.Task[WorkerRun], str] = {}
@@ -82,6 +85,12 @@ class StepScheduler:
                     completed.add(step_id)
                 else:
                     failed.add(step_id)
+                if on_step_complete is not None:
+                    try:
+                        await on_step_complete(step_id, worker)
+                    except Exception:
+                        # 保守失败：checkpoint 落库出错不打断编排。
+                        self._metrics.incr("scheduler.checkpoint_failures")
 
         return SchedulerResult(
             workers=workers,

@@ -40,7 +40,7 @@ from codeagent.context.token_estimator import HeuristicTokenEstimator, TokenEsti
 from codeagent.infra import metrics as M
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.message import ContextCategory, Message, Role
-from codeagent.memory.models import MemoryItem, MemorySource
+from codeagent.memory.models import MemoryItem, MemorySource, MemoryType
 from codeagent.memory.retriever import MemoryRetriever, NullMemoryRetriever, RankedMemory
 
 
@@ -103,9 +103,18 @@ class ContextManager:
         *,
         force_compact: bool = False,
         focus: str | None = None,
+        memory_type_filter: tuple[MemoryType, ...] | None = None,
+        memory_injection_cap: int | None = None,
     ) -> ContextPreparationResult:
         with self.metrics.timer(M.CONTEXT_PREPARE_MS):
-            return await self._prepare(history, profile, force_compact=force_compact, focus=focus)
+            return await self._prepare(
+                history,
+                profile,
+                force_compact=force_compact,
+                focus=focus,
+                memory_type_filter=memory_type_filter,
+                memory_injection_cap=memory_injection_cap,
+            )
 
     async def _prepare(
         self,
@@ -114,6 +123,8 @@ class ContextManager:
         *,
         force_compact: bool,
         focus: str | None,
+        memory_type_filter: tuple[MemoryType, ...] | None = None,
+        memory_injection_cap: int | None = None,
     ) -> ContextPreparationResult:
         messages = history.snapshot()
         tokens_before = self.estimator.estimate(messages)
@@ -185,6 +196,9 @@ class ContextManager:
 
         # ⑥⑦ Memory 注入：仅存在于本次 request，不写回 History。
         memory_budget = _memory_budget(self.estimator.estimate(messages), profile)
+        if memory_injection_cap is not None:
+            # MemoryProfile.max_injection_tokens 收紧上限（P6）
+            memory_budget = min(memory_budget, max(0, memory_injection_cap))
         memory_candidates = 0
         memory_tokens = 0
         memory_selected = 0
@@ -198,6 +212,7 @@ class ContextManager:
                             messages[insertion].text,
                             checkpoint=history.checkpoint,
                             limit=profile.memory_search_limit,
+                            type_filter=memory_type_filter,
                         )
                 memory_candidates = len(ranked)
                 memory_message, memory_selected = _select_memory_message(

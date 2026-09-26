@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from codeagent.agent.models import AgentDefinition, AgentRunResult
 from codeagent.orchestration.task_graph import Step
 from codeagent.runtime.agent_runtime import AgentRuntime
 from codeagent.runtime.local_verifier import VerificationResult
+from codeagent.runtime.react_engine import ReActEngine
 from codeagent.workspace.manager import LocalWorkspaceManager
 
 _DEFN = AgentDefinition(id="default", name="D", system_prompt="", max_reflection_count=3)
@@ -45,7 +47,7 @@ async def test_reflection_retries_until_pass(tmp_path: Path):
     engine = FakeEngine()
     verifier = FlakyVerifier(fail_times=2)
     runtime = AgentRuntime(
-        react_engine=engine,
+        react_engine=cast(ReActEngine, engine),
         workspace_manager=LocalWorkspaceManager(tmp_path),
         local_verifier=verifier,
     )
@@ -61,7 +63,7 @@ async def test_reflection_budget_capped(tmp_path: Path):
     engine = FakeEngine()
     verifier = FlakyVerifier(fail_times=99)  # 永远失败
     runtime = AgentRuntime(
-        react_engine=engine,
+        react_engine=cast(ReActEngine, engine),
         workspace_manager=LocalWorkspaceManager(tmp_path),
         local_verifier=verifier,
     )
@@ -74,7 +76,7 @@ async def test_reflection_budget_capped(tmp_path: Path):
 async def test_workspace_is_injected(tmp_path: Path):
     engine = FakeEngine()
     runtime = AgentRuntime(
-        react_engine=engine,
+        react_engine=cast(ReActEngine, engine),
         workspace_manager=LocalWorkspaceManager(tmp_path),
     )
     worker = await runtime.run(_DEFN, _STEP, session_id="s")
@@ -86,7 +88,7 @@ async def test_workspace_is_injected(tmp_path: Path):
 async def test_trace_id_is_threaded_onto_run(tmp_path: Path):
     engine = FakeEngine()
     runtime = AgentRuntime(
-        react_engine=engine,
+        react_engine=cast(ReActEngine, engine),
         workspace_manager=LocalWorkspaceManager(tmp_path),
     )
     worker = await runtime.run(_DEFN, _STEP, session_id="s", trace_id="mrun_xyz")

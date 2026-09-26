@@ -76,6 +76,7 @@ async def test_git_worktree_merge_back_to_base(tmp_path: Path):
     repo.mkdir()
     _init_repo(repo)
     manager = await build_workspace_manager(repo, isolation="auto")
+    assert isinstance(manager, GitWorktreeWorkspaceManager)
     ws = await manager.create("run_merge")
     # 在 worktree 分支上提交一处改动。
     _commit_file(ws.root, "worker.txt", "hello\n")

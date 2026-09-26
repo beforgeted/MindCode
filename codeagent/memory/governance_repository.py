@@ -40,6 +40,10 @@ class MemoryGovernanceRepository(Protocol):
         limit: int = 100,
     ) -> list[MemoryCandidate]: ...
 
+    async def stage_shared_candidates(
+        self, candidates: tuple[MemoryCandidate, ...]
+    ) -> int: ...
+
     async def finalize_candidate(
         self,
         candidate_key: str,

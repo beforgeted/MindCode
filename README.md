@@ -3,7 +3,7 @@
 Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落地方案与分期见
 [`MindCode_实现设计_V1.md`](MindCode_实现设计_V1.md)。
 
-当前落地范围：**P0–P5**（单 Agent + Multi-Agent 执行骨架）。P6 恢复能力仍未实现。
+当前落地范围：**P0–P6**（单 Agent + Multi-Agent 执行骨架 + 编排持久化/恢复与共享 Memory）。
 
 ## 快速开始
 
@@ -22,6 +22,8 @@ python -m codeagent.cli.app --workspace /path/to/repo
 REPL 命令：`/context` `/compact` `/memory add|list|search|show|delete|harvest`
 `/task <目标>` `/clear` `/metrics` `/quit`。`/task` 走 P5 Multi-Agent：规划 → 并行 Worker
 （git 仓库下各自 worktree 隔离，非 git 回退只读并行+写串行）→ 验收 → 合并回 base。
+`/task --resume <mrun_id>` 走 P6 恢复：跳过已完成 Step，只重跑未完成的（打印出的
+`master_run_id` 即恢复句柄）。
 
 Memory 示例：
 
@@ -75,11 +77,16 @@ pyright             # 类型
 | P5 StepScheduler（pending-set 增量派发，非 barrier） | `orchestration/step_scheduler.py` |
 | P5 Workspace 隔离（git worktree / 非 git 回退） | `workspace/manager.py`、`workspace/git_worktree.py` |
 | P5 MasterRuntime（plan→schedule→verify→replan→merge→cleanup） | `orchestration/master_runtime.py`、`orchestration/master_session.py` |
+| P6 资源锁清理（引用计数驱逐） | `tool/resource_lock.py` |
+| P6 Run 持久化/恢复（跳过已完成 Step，`/task --resume`） | `orchestration/run_store.py`、`orchestration/master_runtime.py` |
+| P6 共享 Memory（Worker 产候选，Supervisor 集中 staging） | `orchestration/shared_memory.py`、`memory/sqlite_store.py` |
+| P6 专项 Agent MemoryProfile（读写边界） | `agent/models.py`、`context/manager.py`、`memory/retriever.py` |
 
 ## 未实现（按分期）
 
-- **P5 验证缺口**：真实模型 Planner/Verifier benchmark、并行写隔离的大规模压测
-- **P6** 资源锁清理 / Run 持久化与恢复 / Multi-Agent 共享 Memory（Worker 产候选、Supervisor 集中写）/ 专项 Agent MemoryProfile
+- **P5/P6 验证缺口**：真实模型 Planner/Verifier benchmark、并行写隔离的大规模压测；
+  跨进程 worktree/branch 的完整崩溃恢复（当前恢复深度=跳过已完成 Step）；
+  Worker 候选自动抽取器（`AgentRuntime.candidate_harvester`）的默认接线。
 
 P2/P3/P4/P5 都采用保守失败：压缩失败不替换 History，Memory 检索失败不阻断对话，
 Judge/治理链失败宁可不写长期 Memory，Planner/Verifier 失败退化/放行不卡编排，

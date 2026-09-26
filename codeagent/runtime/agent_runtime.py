@@ -10,7 +10,8 @@ reflection：LocalVerifier 不过且还有预算时，追加纠正指令再 run_
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Protocol, runtime_checkable
 
 from codeagent.agent.models import AgentDefinition, AgentRunResult, RunStatus
 from codeagent.agent.run import AgentRun
@@ -18,11 +19,25 @@ from codeagent.evidence.event_store import NullEventStore, RawEventStore
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.infra.ids import new_agent_run_id
 from codeagent.infra.metrics import Metrics
+from codeagent.memory.governance_models import MemoryCandidate
 from codeagent.orchestration.task_graph import Step
 from codeagent.runtime.local_verifier import AlwaysPassVerifier, LocalVerifier, VerificationResult
 from codeagent.runtime.react_engine import ReActEngine
 from codeagent.workspace.context import WorkspaceContext
 from codeagent.workspace.manager import WorkspaceManager
+
+
+@runtime_checkable
+class WorkerCandidateHarvester(Protocol):
+    """从一次 Worker 运行里抽取 MemoryCandidate（P6）。
+
+    Worker 只产候选、不落库；由 MasterRuntime 的 SupervisorMemoryWriter 集中 staging。
+    默认不注入 → Worker 产出空候选，行为与 P5 一致。
+    """
+
+    async def harvest(
+        self, run: AgentRun, result: AgentRunResult
+    ) -> tuple[MemoryCandidate, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,12 +57,14 @@ class AgentRuntime:
         workspace_manager: WorkspaceManager,
         local_verifier: LocalVerifier | None = None,
         event_store: RawEventStore | None = None,
+        candidate_harvester: WorkerCandidateHarvester | None = None,
         metrics: Metrics | None = None,
     ) -> None:
         self._engine = react_engine
         self._wsm = workspace_manager
         self._verifier = local_verifier or AlwaysPassVerifier()
         self._events: RawEventStore = event_store or NullEventStore()
+        self._harvester = candidate_harvester
         self._metrics = metrics or Metrics()
 
     async def run(
@@ -97,6 +114,15 @@ class AgentRuntime:
             run.status = RunStatus.FAILED
             result = AgentRunResult.failed(run.run_id, f"{type(exc).__name__}: {exc}")
             verification = VerificationResult(ok=False, reason="exception")
+
+        if self._harvester is not None and result.ok:
+            try:
+                candidates = await self._harvester.harvest(run, result)
+            except Exception:  # 保守失败：抽取候选出错不影响 Worker 结果。
+                self._metrics.incr("agent.candidate_harvest_failures")
+            else:
+                if candidates:
+                    result = replace(result, memory_candidates=candidates)
 
         return WorkerRun(
             step_id=step.id,

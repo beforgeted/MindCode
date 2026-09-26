@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from codeagent.agent.models import AgentDefinition, AgentRunResult, FileChangeKind, FileState
 from codeagent.agent.registry import AgentRegistry
@@ -19,7 +20,7 @@ _DEFN = AgentDefinition(id="default", name="D", system_prompt="")
 
 
 class FakeRuntime:
-    def __init__(self, *, fail=frozenset()):
+    def __init__(self, *, fail: set[str] | frozenset[str] = frozenset()):
         self._fail = fail
         self.trace_ids: list = []
 
@@ -46,7 +47,7 @@ class FakeRuntime:
         )
 
 
-def _master(graph, runtime, verifier=None, *, max_replans=1, tmp="."):
+def _master(graph, runtime, verifier=None, *, max_replans=1, tmp: Path | str = "."):
     scheduler = StepScheduler(
         agent_runtime=runtime,
         agent_registry=AgentRegistry(default=_DEFN),
@@ -78,7 +79,7 @@ async def test_master_runs_multi_step_and_aggregates(tmp_path: Path):
     assert final.replans == 0
     # master_run_id 生成并作为 trace_id 下传给每个 Worker（§27 溯源链）。
     assert final.master_run_id
-    runtime = master._scheduler._runtime  # type: ignore[attr-defined]
+    runtime = cast(FakeRuntime, master._scheduler._runtime)  # type: ignore[attr-defined]
     assert set(runtime.trace_ids) == {final.master_run_id}
 
 

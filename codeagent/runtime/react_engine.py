@@ -77,7 +77,13 @@ class ReActEngine:
             run.context.react_iteration += 1
             self._metrics.incr(M.REACT_ITERATIONS)
 
-            prepared = await self._context.prepare(run.history, run.profile)
+            mprofile = run.definition.memory_profile
+            prepared = await self._context.prepare(
+                run.history,
+                run.profile,
+                memory_type_filter=mprofile.readable_types or None,
+                memory_injection_cap=mprofile.max_injection_tokens,
+            )
             run.context.last_prepared = prepared
             response = await self._llm.chat(
                 prepared.messages,

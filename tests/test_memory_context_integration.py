@@ -32,7 +32,7 @@ class StaticRetriever:
         self.items = items
         self.calls = 0
 
-    async def retrieve(self, query, *, checkpoint=None, limit=50):
+    async def retrieve(self, query, *, checkpoint=None, limit=50, type_filter=None):
         self.calls += 1
         return [RankedMemory(item, 1.0) for item in self.items[:limit]]
 
@@ -58,13 +58,13 @@ class DeterministicCompactor:
 
 
 class TimeoutRetriever:
-    async def retrieve(self, query, *, checkpoint=None, limit=50):
+    async def retrieve(self, query, *, checkpoint=None, limit=50, type_filter=None):
         await asyncio.Event().wait()
         return ()
 
 
 class FailingRetriever:
-    async def retrieve(self, query, *, checkpoint=None, limit=50):
+    async def retrieve(self, query, *, checkpoint=None, limit=50, type_filter=None):
         raise RuntimeError("simulated retrieval failure")
 
 

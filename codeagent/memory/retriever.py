@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from codeagent.context.compact.models import TaskCheckpoint
-from codeagent.memory.models import MemoryItem, MemorySearchQuery, MemorySource
+from codeagent.memory.models import MemoryItem, MemorySearchQuery, MemorySource, MemoryType
 from codeagent.memory.repository import MemoryRepository
 
 _CJK_RE = re.compile(r"[　-ヿ㐀-鿿豈-﫿]+")
@@ -28,6 +28,7 @@ class MemoryRetriever(Protocol):
         *,
         checkpoint: TaskCheckpoint | None = None,
         limit: int = 50,
+        type_filter: tuple[MemoryType, ...] | None = None,
     ) -> Sequence[RankedMemory]: ...
 
 
@@ -38,6 +39,7 @@ class NullMemoryRetriever:
         *,
         checkpoint: TaskCheckpoint | None = None,
         limit: int = 50,
+        type_filter: tuple[MemoryType, ...] | None = None,
     ) -> Sequence[RankedMemory]:
         return ()
 
@@ -62,9 +64,11 @@ class KeywordMemoryRetriever:
         *,
         checkpoint: TaskCheckpoint | None = None,
         limit: int = 50,
+        type_filter: tuple[MemoryType, ...] | None = None,
     ) -> Sequence[RankedMemory]:
         user_terms = _terms(query, 12)
         checkpoint_terms = _checkpoint_terms(checkpoint, 8)
+        allowed = set(type_filter) if type_filter else None
         scores: dict[str, float] = {}
         items: dict[str, MemoryItem] = {}
         weighted_terms = [
@@ -76,6 +80,8 @@ class KeywordMemoryRetriever:
                 MemorySearchQuery(self._project_id, term, limit=10)
             )
             for rank, hit in enumerate(hits, 1):
+                if allowed is not None and hit.item.type not in allowed:
+                    continue  # MemoryProfile.readable_types 过滤（P6）
                 items[hit.item.id] = hit.item
                 scores[hit.item.id] = scores.get(hit.item.id, 0.0) + weight / rank
         ranked = [
