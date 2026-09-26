@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -190,10 +191,61 @@ async def run_repl(config: AppConfig) -> int:
     return 0
 
 
+def _load_dotenv(*candidates: Path) -> Path | None:
+    """极简 .env 加载：KEY=VALUE 逐行读入 os.environ。
+
+    - 不引第三方依赖；支持 `export KEY=VALUE`、`#` 注释、可选引号。
+    - **.env 优先**：会覆盖会话里已存在的同名变量（用户在 .env 里配了就以它为准，
+      避免被外层残留的 ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL 悄悄顶掉）。
+    - 返回实际加载的文件路径（未找到则 None）。
+    """
+    for path in candidates:
+        if not path or not path.is_file():
+            continue
+        try:
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export ") :].lstrip()
+                key, sep, value = line.partition("=")
+                if not sep:
+                    continue
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    os.environ[key] = value
+        except OSError:
+            continue
+        return path
+    return None
+
+
+def _repair_ca_env() -> None:
+    """conda on Windows 常把 SSL_CERT_FILE 指到不存在的路径（缺 Library 段），
+    导致 httpx 建 TLS context 时 FileNotFoundError。指向的文件不存在就删掉该变量，
+    让 Python/httpx 回退到默认 CA，避免真实 LLM 调用一上来就崩。
+    """
+    for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        value = os.environ.get(name)
+        if value and not Path(value).is_file():
+            os.environ.pop(name, None)
+            print(f"[已忽略无效的 {name}（路径不存在）→ 回退默认 CA]")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="codeagent")
     parser.add_argument("--workspace", type=Path, default=None, help="工作目录，默认当前目录")
+    parser.add_argument(
+        "--env", type=Path, default=None, help=".env 路径，默认在工作目录/当前目录查找"
+    )
     args = parser.parse_args(argv)
+    workspace = args.workspace or Path.cwd()
+    loaded = _load_dotenv(args.env, workspace / ".env", Path.cwd() / ".env")
+    if loaded is not None:
+        print(f"[已加载 {loaded}]")
+    _repair_ca_env()
     config = AppConfig.from_env(args.workspace)
     try:
         return asyncio.run(run_repl(config))

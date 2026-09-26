@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -51,6 +52,17 @@ class AnthropicLlmClient:
             raise LlmError("需要 anthropic SDK：pip install anthropic") from exc
         self._client = AsyncAnthropic(api_key=api_key) if api_key else AsyncAnthropic()
         self._metrics = metrics or Metrics()
+        # 不同 anthropic SDK 版本 / 内部构建的 messages.create 参数集合不同
+        # （例如某些构建不接受 temperature）。按签名过滤，避免 unexpected keyword。
+        self._create_params = _supported_params(self._client.messages.create)
+        self._count_params = _supported_params(
+            getattr(self._client.messages, "count_tokens", None)
+        )
+
+    def _filter(self, kwargs: dict[str, Any], allowed: set[str] | None) -> dict[str, Any]:
+        if not allowed:
+            return kwargs
+        return {k: v for k, v in kwargs.items() if k in allowed}
 
     async def chat(
         self,
@@ -76,7 +88,7 @@ class AnthropicLlmClient:
 
         start = time.perf_counter()
         try:
-            resp = await self._client.messages.create(**kwargs)
+            resp = await self._client.messages.create(**self._filter(kwargs, self._create_params))
         except Exception as exc:
             raise LlmError(f"anthropic 调用失败: {exc}") from exc
         self._metrics.observe(LLM_CALL_MS, (time.perf_counter() - start) * 1000.0)
@@ -130,10 +142,29 @@ class AnthropicLlmClient:
                 for t in tools
             ]
         try:
-            result = await self._client.messages.count_tokens(**kwargs)
+            result = await self._client.messages.count_tokens(
+                **self._filter(kwargs, self._count_params)
+            )
         except Exception:
             return None
         return int(getattr(result, "input_tokens", 0))
+
+
+def _supported_params(method: Any) -> set[str] | None:
+    """method 的关键字参数名集合；含 **kwargs 或无法内省时返回 None（不过滤）。"""
+    if method is None:
+        return None
+    try:
+        params = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return None
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):
+        return None
+    return {
+        p.name
+        for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
 
 
 def _split(messages: Sequence[Message]) -> tuple[list[dict], list[dict]]:
