@@ -37,6 +37,12 @@ def _worktree_count(repo: Path) -> int:
     return len(out.splitlines())
 
 
+def _status_porcelain(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True
+    ).stdout
+
+
 def _config(repo: Path) -> AppConfig:
     return AppConfig(
         workspace_root=repo,
@@ -90,5 +96,56 @@ async def test_two_workers_write_in_worktrees_and_merge_back(tmp_path: Path):
     assert (repo / "b.txt").read_text(encoding="utf-8") == "BBB"
     assert len(final.merged_branches) == 2
     assert final.merge_conflicts == ()
+    assert final.integrated
     # worktree 已清理，只剩主工作树。
     assert _worktree_count(repo) == 1
+
+
+@pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
+async def test_merge_conflict_aborts_and_keeps_base_clean(tmp_path: Path):
+    """两个 Worker 写同一个文件 → 第二个分支合并冲突。
+
+    修复点：冲突必须 `git merge --abort` 回滚，base 不能留在半完成 merge 状态
+    （MERGE_HEAD / 冲突标记）；且 accepted 可能为 True，但 integrated 必须为 False。
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    config = _config(repo)  # agent_max_concurrency=1，串行确定顺序
+
+    client = StubLlmClient(
+        [
+            [("write_file", {"path": "shared.txt", "content": "AAA"})],
+            "done A",
+            [("write_file", {"path": "shared.txt", "content": "BBB"})],
+            "done B",
+        ]
+    )
+    graph = TaskGraph(
+        [Step("a", "default", "写 shared.txt"), Step("b", "default", "再写 shared.txt")]
+    )
+
+    async with AgentSession(config, llm_client=client) as session:
+        master = await build_master(
+            config=config,
+            llm_client=client,
+            engine=session.engine,
+            event_store=session.event_store,
+            metrics=session.metrics,
+            definition=session.definition,
+            planner=StaticPlanner(graph),
+        )
+        final = await master.run("写两次同一个文件", session_id=session.session_id)
+
+    # 第一个分支合并成功，第二个冲突。
+    assert len(final.merged_branches) == 1
+    assert len(final.merge_conflicts) == 1
+    # 关键：验收通过但未集成。
+    assert final.integrated is False
+    # base 必须干净——没有半完成的 merge，没有冲突标记。
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+    porcelain = _status_porcelain(repo)
+    assert "UU" not in porcelain and "AA" not in porcelain
+    content = (repo / "shared.txt").read_text(encoding="utf-8")
+    assert "<<<<<<<" not in content
+    assert content == "AAA"  # 停在第一个分支合并后的一致状态

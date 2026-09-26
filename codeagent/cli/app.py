@@ -127,6 +127,8 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
         goal, session_id=session.session_id, resume_master_run_id=resume_id
     )
     print(f"\n[任务{'已接受' if final.accepted else '未接受'}] {final.reason}")
+    if final.accepted and not final.integrated:
+        print("[注意] 验收通过但存在合并冲突，改动未完整落回 base，需人工处理")
     print(f"master_run_id: {final.master_run_id}（可用 /task --resume {final.master_run_id} 恢复）")
     sched = final.scheduler
     if sched is not None:

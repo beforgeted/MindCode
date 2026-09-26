@@ -38,6 +38,9 @@ class FinalResult:
     merged_branches: tuple[str, ...] = ()
     merge_conflicts: tuple[str, ...] = ()
     replans: int = 0
+    # accepted 只反映各 Worker 的验收；integrated 还要求合并干净落回 base。
+    # 有合并冲突时 accepted 可能为 True 但 integrated 为 False（产物未真正集成）。
+    integrated: bool = True
 
 
 class MasterRuntime:
@@ -164,6 +167,7 @@ class MasterRuntime:
             merged_branches=tuple(merged),
             merge_conflicts=tuple(conflicts),
             replans=replans,
+            integrated=verdict.accept and not conflicts,
         )
 
     async def _merge(

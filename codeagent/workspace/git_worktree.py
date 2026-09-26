@@ -99,17 +99,37 @@ class GitWorktreeWorkspaceManager:
         return await asyncio.to_thread(self._commit_sync, workspace, message)
 
     def _commit_sync(self, workspace: WorkspaceContext, message: str) -> bool:
-        _run_git(workspace.root, "add", "-A")
-        status = _run_git(workspace.root, "status", "--porcelain")
-        if not status.strip():
+        # 排除 __pycache__/*.pyc 等运行期产物：Worker 跑测试会生成它们，
+        # 不应混进合并回 base 的改动里。
+        _run_git(
+            workspace.root,
+            "add",
+            "-A",
+            "--",
+            ".",
+            ":(exclude)*.pyc",
+            ":(exclude)*__pycache__*",
+        )
+        staged = _run_git(workspace.root, "diff", "--cached", "--name-only")
+        if not staged.strip():
             return False
         _run_git(workspace.root, "commit", "-m", message)
         return True
 
     async def merge(self, workspace: WorkspaceContext) -> None:
-        """把 Worker 分支合并回 base。冲突时抛 GitWorktreeError，不自动解冲突。"""
+        """把 Worker 分支合并回 base。冲突时先 `git merge --abort` 保持 base 干净，再抛。"""
         if not workspace.branch_name:
             return
-        await asyncio.to_thread(
-            _run_git, self._repo, "merge", "--no-edit", workspace.branch_name
-        )
+        await asyncio.to_thread(self._merge_sync, workspace.branch_name)
+
+    def _merge_sync(self, branch: str) -> None:
+        try:
+            _run_git(self._repo, "merge", "--no-edit", branch)
+        except GitWorktreeError:
+            # 冲突/失败会把 base 工作树丢在半完成的 merge 状态（MERGE_HEAD + 冲突标记），
+            # 导致 base 直接不可用。必须回滚,让 base 保持一致,再把冲突上抛交人工。
+            try:
+                _run_git(self._repo, "merge", "--abort")
+            except GitWorktreeError:
+                pass
+            raise
