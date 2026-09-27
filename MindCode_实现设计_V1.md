@@ -499,7 +499,7 @@ allowance 内，`ImagePayloadPruner` 跳过 `data is None` 的图片。
 
 | 风险 | 现状 | 计划 |
 |---|---|---|
-| `run_command` 执行模型给出的任意 shell 命令，只挡了几条明显破坏性的命令，**没有**用户确认或沙箱 | 已在代码和 README 中标注 | gating 属于 CLI 层，需要在接真实模型做实际开发前补上 |
+| `run_command` 执行模型给出的 shell | **P7**：已加 CommandPolicy 分类 + 进程树终止 + env 过滤 + 推测期禁 external + ApprovalPolicy（默认拒） | 完整容器沙箱（SandboxExecutor 仅占位）、延后动作 post-promote 执行、网络真隔离待后续 Phase |
 | 启发式 token 估算的系数是拍的 | `CalibratedTokenEstimator` 可以用精确计数校准，但默认没启用 | 接真实模型后跑一批真实会话校准 |
 | `soft/hard/target` 三档比例（0.80 / 0.92 / 0.55）是照文档抄的 | 已全部可配置 | P2 完成后按真实 benchmark 调 |
 | `TurnIdPartitioner` 对没打 `turn_id` 的消息用启发式补 | 单 Agent 下够用 | P2/P5 前换成纯 `turn_id` 驱动 |

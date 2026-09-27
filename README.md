@@ -103,5 +103,11 @@ Judge/治理链失败宁可不写长期 Memory，Planner/Verifier 失败退化/�
 
 ## 安全说明
 
-`run_command` 执行模型给出的任意 shell 命令，只挡了几条明显破坏性的命令，
-**没有**用户确认或沙箱机制。在不受信任的环境使用前必须先补 gating。
+`run_command` 执行模型给出的 shell 命令。**P7 起**已加：`CommandPolicy` 命令分类（危险命令拒绝、
+外部副作用识别，可配 `CODEAGENT_CMD_ALLOW/DENY`）、`CommandExecutor` 加固（**进程树终止**、
+**env 白名单过滤**不泄露密钥）、**推测执行期禁止不可回滚的外部副作用**（网络/发布/DB/部署→被拦并记为
+待处理动作）、放行阶段经 `ApprovalPolicy`（默认 fail-safe 拒绝）。
+
+**仍缺**（后续 Phase）：完整容器**沙箱**（`SandboxExecutor` 仅接口占位）、延后外部动作的真正
+post-promote 执行、网络策略真隔离。在完全不受信任的环境仍需补沙箱。
+
