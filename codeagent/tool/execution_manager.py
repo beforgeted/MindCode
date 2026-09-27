@@ -33,6 +33,7 @@ from codeagent.evidence.models import AgentEvent, EventType, EvidenceRef, Eviden
 from codeagent.infra import metrics as M
 from codeagent.infra.cancellation import CancellationToken, CancelledByUser
 from codeagent.infra.metrics import Metrics
+from codeagent.tool.approval import ApprovalPolicy, DenyExternalApprovalPolicy
 from codeagent.tool.base import Tool, ToolExecutionContext
 from codeagent.tool.command_policy import CommandPolicy
 from codeagent.tool.executor import CommandExecutor, LocalExecutor
@@ -63,6 +64,8 @@ class ExecutionScope:
     cancellation: CancellationToken
     profile: ContextProfile
     turn_id: str | None = None
+    # 推测执行阶段（Worker 在 candidate 内）为 False → 外部副作用禁止。
+    allow_external_effects: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +89,7 @@ class ToolExecutionManager:
         metrics: Metrics | None = None,
         command_policy: CommandPolicy | None = None,
         command_executor: CommandExecutor | None = None,
+        approval_policy: ApprovalPolicy | None = None,
     ) -> None:
         self._registry = registry
         self._normalizer = normalizer
@@ -96,6 +100,7 @@ class ToolExecutionManager:
         self._metrics = metrics or Metrics()
         self._command_policy = command_policy or CommandPolicy()
         self._command_executor = command_executor or LocalExecutor()
+        self._approval = approval_policy or DenyExternalApprovalPolicy()
 
     async def execute_batch(
         self, scope: ExecutionScope, calls: Sequence[ToolCall]
@@ -242,6 +247,8 @@ class ToolExecutionManager:
             timeout_seconds=scope.profile.tool_timeout_seconds,
             command_policy=self._command_policy,
             command_executor=self._command_executor,
+            allow_external_effects=scope.allow_external_effects,
+            approval=self._approval,
         )
         keys = _resource_keys(tool, call)
 

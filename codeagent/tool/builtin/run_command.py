@@ -58,6 +58,16 @@ class RunCommandTool(BaseTool):
         decision = ctx.command_policy.classify(command)
         if not decision.allowed:
             return ToolResult.error(call, f"命令被拒绝执行（{decision.reason}）: {command}")
+        if decision.effect is EffectKind.EXTERNAL_SIDE_EFFECT:
+            if not ctx.allow_external_effects:
+                # 推测执行阶段：外部副作用 candidate 回滚不了，一律禁止（应延后到验收通过后）。
+                return ToolResult.error(
+                    call,
+                    f"外部副作用在推测执行阶段禁止（{decision.reason}），"
+                    f"已阻止，请改为验收通过后执行: {command}",
+                )
+            if not await ctx.approval.approve(decision, command=command):
+                return ToolResult.error(call, f"外部副作用未获批准（{decision.reason}）: {command}")
 
         try:
             cwd = ctx.workspace.resolve(str(arguments.get("cwd") or "."))

@@ -59,6 +59,8 @@ class AgentRun:
     cancellation: CancellationToken = field(default_factory=CancellationToken)
     status: RunStatus = RunStatus.CREATED
     reflection_count: int = 0
+    # 推测执行阶段（Worker 在 candidate 内）为 False → 外部副作用禁止。默认安全拒绝。
+    allow_external_effects: bool = False
     _event_store: RawEventStore | None = None
 
     def __post_init__(self) -> None:

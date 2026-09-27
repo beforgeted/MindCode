@@ -20,6 +20,7 @@ from typing import Any, Protocol, runtime_checkable
 from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.llm.types import ToolSpec
+from codeagent.tool.approval import ApprovalPolicy, DenyExternalApprovalPolicy
 from codeagent.tool.command_policy import CommandPolicy
 from codeagent.tool.effects import EffectKind, RetryPolicy
 from codeagent.tool.executor import CommandExecutor, LocalExecutor
@@ -45,6 +46,10 @@ class ToolExecutionContext:
     command_policy: CommandPolicy = field(default_factory=CommandPolicy)
     # 命令执行器（run_command 用）。默认本机执行器；可换 SandboxExecutor。
     command_executor: CommandExecutor = field(default_factory=LocalExecutor)
+    # 推测执行阶段（Worker 在 candidate 内）为 False → 外部副作用一律禁止。
+    allow_external_effects: bool = False
+    # 放行阶段的审批策略。默认 fail-safe 拒绝。
+    approval: ApprovalPolicy = field(default_factory=DenyExternalApprovalPolicy)
 
 
 @runtime_checkable
