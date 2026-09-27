@@ -9,3 +9,5 @@ build/
 .ruff_cache/
 .codeagent/
 .env
+# 测试场景套件只存活在 test/scenarios 分支，main 不跟踪（避免推送主分支时带上）
+scenarios/
