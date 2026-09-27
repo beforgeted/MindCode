@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections import deque
 from typing import Any
 
@@ -29,12 +28,6 @@ from codeagent.tool.models import ToolCall, ToolConcurrencyMode, ToolResult
 
 _CHUNK = 64 * 1024
 _PREVIEW_BYTES = 128 * 1024
-
-# 极小的黑名单，不是安全边界，只是防手滑。
-_DENY = re.compile(
-    r"(?:^|[\s;&|])(?:rm\s+-rf\s+/(?:\s|$)|mkfs|dd\s+if=.*of=/dev/|:\(\)\{.*\};:)",
-    re.IGNORECASE,
-)
 
 
 class RunCommandTool(BaseTool):
@@ -71,8 +64,9 @@ class RunCommandTool(BaseTool):
         command = str(arguments.get("command", "")).strip()
         if not command:
             return ToolResult.error(call, "缺少参数 command")
-        if _DENY.search(command):
-            return ToolResult.error(call, f"命令被拒绝执行（疑似破坏性操作）: {command}")
+        decision = ctx.command_policy.classify(command)
+        if not decision.allowed:
+            return ToolResult.error(call, f"命令被拒绝执行（{decision.reason}）: {command}")
 
         try:
             cwd = ctx.workspace.resolve(str(arguments.get("cwd") or "."))

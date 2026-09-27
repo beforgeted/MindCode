@@ -33,6 +33,7 @@ from codeagent.runtime.react_engine import ReActEngine
 from codeagent.tool.builtin import default_tools
 from codeagent.tool.builtin.evidence_get import EvidenceGetTool
 from codeagent.tool.builtin.memory_get import MemoryGetTool
+from codeagent.tool.command_policy import CommandPolicy
 from codeagent.tool.execution_manager import ToolExecutionManager
 from codeagent.tool.normalizer import ToolResultNormalizer
 from codeagent.tool.registry import ToolRegistry
@@ -139,6 +140,10 @@ class AgentSession:
             max_concurrency=config.max_tool_concurrency,
             event_store=self.event_store,
             metrics=self.metrics,
+            command_policy=CommandPolicy(
+                extra_allow=list(config.command_allowlist),
+                extra_deny=list(config.command_denylist),
+            ),
         )
         self.engine = ReActEngine(
             llm_client=llm_client,

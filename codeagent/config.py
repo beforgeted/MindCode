@@ -19,6 +19,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_patterns(name: str) -> tuple[str, ...]:
+    raw = os.environ.get(name)
+    if not raw:
+        return ()
+    return tuple(p.strip() for p in raw.split(";") if p.strip())
+
+
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     workspace_root: Path
@@ -31,6 +38,9 @@ class AppConfig:
     use_stub_llm: bool = False
     # 集成产物的确定性验收命令（在 validation worktree 跑,exit 0 = 通过）;None=不跑,靠 LLM 读产物。
     verify_command: str | None = None
+    # run_command 命令策略的配置化扩展（正则）。CODEAGENT_CMD_ALLOW/DENY，`;` 分隔。
+    command_allowlist: tuple[str, ...] = ()
+    command_denylist: tuple[str, ...] = ()
 
     @property
     def state_root(self) -> Path:
@@ -65,6 +75,8 @@ class AppConfig:
             profile=profile,
             use_stub_llm=not os.environ.get("ANTHROPIC_API_KEY"),
             verify_command=os.environ.get("CODEAGENT_VERIFY_CMD") or None,
+            command_allowlist=_env_patterns("CODEAGENT_CMD_ALLOW"),
+            command_denylist=_env_patterns("CODEAGENT_CMD_DENY"),
         )
 
 

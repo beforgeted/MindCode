@@ -14,12 +14,13 @@ ToolExecutionContext 传入，绝不从隐式全局状态里找"当前 workspace
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.llm.types import ToolSpec
+from codeagent.tool.command_policy import CommandPolicy
 from codeagent.tool.effects import EffectKind, RetryPolicy
 from codeagent.tool.models import ToolConcurrencyMode, ToolResult
 from codeagent.workspace.context import WorkspaceContext
@@ -39,6 +40,8 @@ class ToolExecutionContext:
     artifact_store: ArtifactStore
     max_output_bytes: int = 4 * 1024 * 1024
     timeout_seconds: float = 60.0
+    # 命令分类策略（run_command 用）。默认内置规则；session 装配时可注入配置化实例。
+    command_policy: CommandPolicy = field(default_factory=CommandPolicy)
 
 
 @runtime_checkable
