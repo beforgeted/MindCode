@@ -24,6 +24,7 @@ from codeagent.infra.cancellation import CancelledByUser
 from codeagent.infra.text import TRUNCATION_MARKER
 from codeagent.llm.types import ToolSpec
 from codeagent.tool.base import BaseTool, ToolExecutionContext
+from codeagent.tool.effects import EffectKind, RetryPolicy
 from codeagent.tool.models import ToolCall, ToolConcurrencyMode, ToolResult
 
 _CHUNK = 64 * 1024
@@ -38,6 +39,10 @@ _DENY = re.compile(
 
 class RunCommandTool(BaseTool):
     concurrency_mode = ToolConcurrencyMode.SERIAL
+    # 类属性是**保守默认**：任意 shell 命令按"改工作区、不可安全重放"对待。
+    # 真实的按命令分类（read_only / workspace_write / external）由 CommandPolicy 在 7b 完成。
+    effect_kind = EffectKind.WORKSPACE_WRITE
+    retry_policy = RetryPolicy.NEVER
 
     @property
     def name(self) -> str:

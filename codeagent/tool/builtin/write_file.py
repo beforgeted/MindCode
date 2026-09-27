@@ -6,6 +6,7 @@ from typing import Any
 
 from codeagent.llm.types import ToolSpec
 from codeagent.tool.base import BaseTool, ToolExecutionContext
+from codeagent.tool.effects import EffectKind, RetryPolicy
 from codeagent.tool.models import ToolCall, ToolConcurrencyMode, ToolResult
 
 
@@ -17,6 +18,9 @@ class WriteFileTool(BaseTool):
     """
 
     concurrency_mode = ToolConcurrencyMode.EXCLUSIVE_RESOURCE
+    # 只改仓库内文件 → candidate 可隔离/回滚；覆盖写是幂等的 → 可安全重跑。
+    effect_kind = EffectKind.WORKSPACE_WRITE
+    retry_policy = RetryPolicy.SAFE
 
     @property
     def name(self) -> str:

@@ -20,6 +20,7 @@ from typing import Any, Protocol, runtime_checkable
 from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.llm.types import ToolSpec
+from codeagent.tool.effects import EffectKind, RetryPolicy
 from codeagent.tool.models import ToolConcurrencyMode, ToolResult
 from codeagent.workspace.context import WorkspaceContext
 
@@ -49,6 +50,17 @@ class Tool(Protocol):
     def concurrency_mode(self) -> ToolConcurrencyMode: ...
 
     @property
+    def effect_kind(self) -> EffectKind:
+        """默认副作用类别。run_command 是动态的（由 CommandPolicy 按命令定），
+        以类属性给出的是保守默认，真实判定在工具内部完成。"""
+        ...
+
+    @property
+    def retry_policy(self) -> RetryPolicy:
+        """默认重试语义。同上，动态工具以此为保守默认。"""
+        ...
+
+    @property
     def spec(self) -> ToolSpec: ...
 
     def resource_keys(self, arguments: dict[str, Any]) -> tuple[str, ...]:
@@ -62,9 +74,11 @@ class Tool(Protocol):
 
 
 class BaseTool:
-    """便利基类：默认 READ_ONLY、无资源锁。"""
+    """便利基类：默认 READ_ONLY 并发、READ_ONLY 副作用、SAFE 可重跑、无资源锁。"""
 
     concurrency_mode: ToolConcurrencyMode = ToolConcurrencyMode.READ_ONLY
+    effect_kind: EffectKind = EffectKind.READ_ONLY
+    retry_policy: RetryPolicy = RetryPolicy.SAFE
 
     def resource_keys(self, arguments: dict[str, Any]) -> tuple[str, ...]:
         return ()
