@@ -197,3 +197,72 @@ async def test_cancellation_token_is_forwarded_to_workers():
     graph = TaskGraph([Step("a", "default", "A")])
     await _scheduler(RecordingRuntime()).run(graph, session_id="s", cancellation=token)
     assert seen == [token]
+
+
+async def test_instruction_integrator_augments_instruction():
+    from codeagent.orchestration.integrator import InstructionIntegrator
+
+    step = Step("a", "default", "把 config 里的超时改成 30")
+    out = await InstructionIntegrator().reconcile(
+        step, conflict="merge failed", overlap=("config.py",)
+    )
+    assert out is not None
+    assert out.id == "a"
+    assert "config.py" in out.instruction
+    assert "把 config 里的超时改成 30" in out.instruction  # 原目标保留
+    assert "read_file" in out.instruction  # 提示先读现状
+
+
+async def test_integrator_kicks_in_after_rerun_budget_and_converges():
+    """重跑预算耗尽仍过期 → Integrator 兜底、带增强指令重跑 → 最终集成。"""
+    from codeagent.orchestration.integration_coordinator import IntegrationOutcome
+    from codeagent.orchestration.integrator import InstructionIntegrator
+
+    events: list[str] = []
+
+    class RunRuntime:
+        async def run(
+            self, definition, step, *, session_id, cancellation=None, trace_id=None, base_ref=None
+        ):
+            events.append(f"run:{step.id}")
+            run = AgentRun.create(
+                definition, session_id=session_id, workspace=WorkspaceContext.local(Path("."))
+            )
+            return WorkerRun(
+                step_id=step.id, run=run,
+                result=AgentRunResult.success(run.run_id, step.id),
+                workspace=run.workspace, verification=VerificationResult(ok=True),
+            )
+
+    class StagedCoordinator:
+        def __init__(self):
+            self.calls = 0
+
+        async def integrate(self, worker, candidate=None) -> IntegrationOutcome:
+            self.calls += 1
+            events.append(f"integrate#{self.calls}")
+            # 前两次判过期（消耗一次重跑 + 触发 Integrator），第三次集成成功。
+            if self.calls < 3:
+                return IntegrationOutcome("stale", branch="b", overlap=("shared.py",))
+            return IntegrationOutcome("integrated", branch="b")
+
+        async def discard(self, worker):
+            events.append("discard")
+
+    integrator = InstructionIntegrator()
+    scheduler = StepScheduler(
+        agent_runtime=cast(AgentRuntime, RunRuntime()),
+        agent_registry=AgentRegistry(default=_DEFN),
+        integration_coordinator=cast(IntegrationCoordinator, StagedCoordinator()),
+        max_reruns=1,
+        integrator=integrator,
+        max_integrations=1,
+    )
+    graph = TaskGraph([Step("a", "default", "写 shared.py")])
+    result = await scheduler.run(graph, session_id="s")
+
+    assert result.integrated == {"a"}
+    assert result.failed == set()
+    # 一次初始 + 一次重跑 + 一次 Integrator 兜底 = 3 次 run；第 3 次集成成功。
+    assert events.count("run:a") == 3
+    assert events.count("integrate#1") == 1 and "integrate#3" in events

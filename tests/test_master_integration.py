@@ -114,7 +114,12 @@ async def test_overlapping_sibling_detected_stale_keeps_base_clean(tmp_path: Pat
     config = _config(repo)
     config = replace(
         config,
-        profile=replace(config.profile, master_max_replans=0, agent_max_reruns=0),
+        profile=replace(
+            config.profile,
+            master_max_replans=0,
+            agent_max_reruns=0,
+            agent_max_integrations=0,
+        ),
     )
 
     client = StubLlmClient(

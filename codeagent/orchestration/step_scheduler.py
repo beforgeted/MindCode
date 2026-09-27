@@ -24,6 +24,7 @@ from codeagent.agent.registry import AgentRegistry
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.infra.metrics import Metrics
 from codeagent.orchestration.integration_coordinator import IntegrationCoordinator
+from codeagent.orchestration.integrator import Integrator, NullIntegrator
 from codeagent.orchestration.task_graph import Step, TaskGraph
 from codeagent.runtime.agent_runtime import AgentRuntime, WorkerRun
 from codeagent.workspace.context import WorkspaceContext
@@ -54,6 +55,8 @@ class StepScheduler:
         isolated: bool = True,
         integration_coordinator: IntegrationCoordinator | None = None,
         max_reruns: int = 2,
+        integrator: Integrator | None = None,
+        max_integrations: int = 1,
         metrics: Metrics | None = None,
     ) -> None:
         self._runtime = agent_runtime
@@ -62,6 +65,8 @@ class StepScheduler:
         self._isolated = isolated
         self._coordinator = integration_coordinator or IntegrationCoordinator()
         self._max_reruns = max(0, max_reruns)
+        self._integrator = integrator or NullIntegrator()
+        self._max_integrations = max(0, max_integrations)
         self._metrics = metrics or Metrics()
 
     async def run(
@@ -91,6 +96,9 @@ class StepScheduler:
         pending: list[str] = []  # 已验收、待集成的 step_id（确定序消费）
         dispatched: set[str] = set(skip)
         rerun_left: dict[str, int] = {}  # 过期重跑预算（Phase 2）
+        integrator_left: dict[str, int] = {}  # Integrator 兜底预算（Phase 3）
+        base_steps = {step.id: step for step in graph.steps}
+        overrides: dict[str, Step] = {}  # Integrator 生成的增强指令 Step,按 step_id 覆盖派发
         max_parallel = 0
 
         async def _notify(step_id: str, worker: WorkerRun, ok: bool) -> None:
@@ -101,18 +109,20 @@ class StepScheduler:
                     self._metrics.incr("scheduler.checkpoint_failures")
 
         while True:
-            # ① 派发：依赖已 integrated 且未派发的 Step
+            # ① 派发：依赖已 integrated 且未派发的 Step（Integrator 增强指令通过 overrides 生效）
             for step in graph.ready(integrated, exclude=dispatched):
                 dispatched.add(step.id)
+                dispatch_step = overrides.get(step.id, step)
                 task = asyncio.create_task(
                     self._run_step(
-                        step, session_id, semaphore, write_lock, cancellation, trace_id, base_ref
+                        dispatch_step, session_id, semaphore, write_lock,
+                        cancellation, trace_id, base_ref,
                     )
                 )
                 running[task] = step.id
             max_parallel = max(max_parallel, len(running))
 
-            # ② 串行集成：取 step order 最小的一个待集成 Worker 并回 base,然后回到①解锁后继
+            # ② 串行集成：取 step order 最小的一个待集成 Worker 并回 candidate,然后回到①解锁后继
             if pending:
                 pending.sort(key=lambda sid: step_order.get(sid, 1 << 30))
                 step_id = pending.pop(0)
@@ -123,20 +133,37 @@ class StepScheduler:
                     if outcome.branch:
                         integrated_branches.append(outcome.branch)
                     await _notify(step_id, worker, True)
-                elif outcome.stale and rerun_left.get(step_id, self._max_reruns) > 0:
-                    # 推测执行过期：丢弃过期 worktree,在最新 HEAD 上重跑（收敛,用户无感）
+                    continue
+                if outcome.stale and rerun_left.get(step_id, self._max_reruns) > 0:
+                    # 推测执行过期：丢弃过期 worktree,用**原指令**在最新基线重跑（Phase 2）
                     rerun_left[step_id] = rerun_left.get(step_id, self._max_reruns) - 1
                     self._metrics.incr("scheduler.reruns")
                     await self._coordinator.discard(worker)
                     dispatched.discard(step_id)
                     completed.discard(step_id)
                     workers.pop(step_id, None)
-                else:
-                    # 集成失败或重跑预算耗尽 → 该步失败,阻断其后继
-                    failed.add(step_id)
-                    if outcome.conflict:
-                        conflicts.append(f"{outcome.branch}: {outcome.conflict}")
-                    await _notify(step_id, worker, False)
+                    continue
+                if outcome.stale and integrator_left.get(step_id, self._max_integrations) > 0:
+                    # 重跑预算耗尽仍过期 → Integrator 兜底：带冲突现场的增强指令再跑一次（Phase 3）
+                    augmented = await self._integrator.reconcile(
+                        base_steps[step_id], conflict=outcome.conflict, overlap=outcome.overlap
+                    )
+                    if augmented is not None:
+                        integrator_left[step_id] = (
+                            integrator_left.get(step_id, self._max_integrations) - 1
+                        )
+                        self._metrics.incr("scheduler.integrations")
+                        await self._coordinator.discard(worker)
+                        overrides[step_id] = augmented
+                        dispatched.discard(step_id)
+                        completed.discard(step_id)
+                        workers.pop(step_id, None)
+                        continue
+                # 无兜底 / 兜底放弃 → 该步失败,阻断其后继
+                failed.add(step_id)
+                if outcome.conflict:
+                    conflicts.append(f"{outcome.branch}: {outcome.conflict}")
+                await _notify(step_id, worker, False)
                 continue
 
             # ③ 无在跑、无待集成 → 结束

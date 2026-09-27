@@ -29,6 +29,7 @@ from codeagent.orchestration.global_verifier import (
     NoFailureVerifier,
 )
 from codeagent.orchestration.integration_coordinator import IntegrationCoordinator
+from codeagent.orchestration.integrator import InstructionIntegrator
 from codeagent.orchestration.master_runtime import FinalResult, MasterRuntime
 from codeagent.orchestration.planner import LlmPlanner, Planner
 from codeagent.orchestration.run_store import RunStore
@@ -87,6 +88,8 @@ async def build_master(
         isolated=wsm.isolated,
         integration_coordinator=IntegrationCoordinator(wsm, metrics=metrics),
         max_reruns=config.profile.agent_max_reruns,
+        integrator=InstructionIntegrator(),
+        max_integrations=config.profile.agent_max_integrations,
         metrics=metrics,
     )
     memory_writer: SupervisorWriter = (

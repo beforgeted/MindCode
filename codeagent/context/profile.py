@@ -58,6 +58,8 @@ class ContextProfile:
     master_max_replans: int = 1
     # 集成期检测到"推测执行过期"时,在最新基线上重跑的次数上限（P6 Phase 2）
     agent_max_reruns: int = 2
+    # 重跑预算耗尽仍不收敛时,Integrator 兜底次数上限（P6 Phase 3）
+    agent_max_integrations: int = 1
 
     # Tool 结果治理（P1）
     # tool 边界硬上限：超过这个数一律 offload 到 artifact

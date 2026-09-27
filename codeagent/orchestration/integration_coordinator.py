@@ -34,6 +34,7 @@ class IntegrationOutcome:
     status: str  # "integrated" | "stale" | "failed"
     branch: str | None = None
     conflict: str | None = None
+    overlap: tuple[str, ...] = ()  # 与已集成改动重叠的文件（供 Integrator 交代冲突现场）
 
     @property
     def integrated(self) -> bool:
@@ -79,9 +80,11 @@ class IntegrationCoordinator:
                 if intervening:
                     write_set = await wsm.branch_files(ws.base_revision, ws.branch_name)
                     read_set, reads_unknown = _read_info(worker)
-                    if (intervening & (write_set | read_set)) or reads_unknown:
+                    overlap = intervening & (write_set | read_set)
+                    if overlap or reads_unknown:
                         self._metrics.incr("integration.stale")
-                        return IntegrationOutcome("stale", branch=ws.branch_name)
+                        hint = tuple(sorted(overlap or intervening))
+                        return IntegrationOutcome("stale", branch=ws.branch_name, overlap=hint)
 
         try:
             await wsm.merge_into(candidate, ws)  # 冲突于 candidate merge --abort,不碰真实 base
