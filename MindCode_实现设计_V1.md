@@ -512,7 +512,7 @@ allowance 内，`ImagePayloadPruner` 跳过 `data is None` 的图片。
 ## 9. 当前状态
 
 ```
-120 tests passed
+127 passed
 ruff check: All checks passed
 pyright: 0 errors
 ```

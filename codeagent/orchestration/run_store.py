@@ -1,13 +1,16 @@
-"""RunStore：MasterRuntime 编排的持久化与恢复（P6）。
+"""RunStore：MasterRuntime 编排的持久化与恢复（P6，P5+ 事务化后语义更新）。
 
-目标（V1 §3 P6，深度=「跳过已完成 Step」）：`/task` 编排中断后可 resume——
-已完成 / 已合并的 Step 不重跑、不重复合并，只重跑未完成的。
+持久化：planned graph 的 JSON + 每个 Step 的 `step_outcome`（崩溃安全的增量 checkpoint，
+upsert 幂等）。恢复时重建 TaskGraph、**不重新 plan**，避免图漂移。
 
-设计：
-- 持久化 planned graph 的 JSON。恢复时直接重建 TaskGraph，**不重新 plan**，避免图漂移。
-- 每个 Step 完成即落 `step_outcome`（崩溃安全的增量 checkpoint），upsert 幂等。
-- SQLite + WAL + `asyncio.to_thread`，风格对齐 memory/sqlite_store.py。
-- 默认 NullRunStore（no-op）：单测 / 不需要持久化时零成本。
+**恢复语义（P5+ Master Attempt Transaction 之后）**：不再做「跳过已完成 Step」的部分恢复——
+因为集成有非幂等副作用，在已改状态上续跑会重复叠加。改为：**未成功 promote 的 run 一律从
+干净 Attempt（original_base）整体重开**，只有已 promote（SUCCESS）的 run 才算完成、不再重跑。
+step_outcome 现主要作审计/可观测，不用于"跳过已完成"。（完整的 Attempt 级崩溃断点恢复见
+V1 §Phase 8 规划，尚未落地。）
+
+设计：SQLite + WAL + `asyncio.to_thread`，风格对齐 memory/sqlite_store.py；默认 NullRunStore
+（no-op）：单测 / 不需要持久化时零成本。
 """
 
 from __future__ import annotations

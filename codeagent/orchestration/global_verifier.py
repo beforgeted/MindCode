@@ -1,7 +1,9 @@
-"""GlobalVerifier：跨 Worker 的全局验收（并行文档 §23）。
+"""GlobalVerifier：跨 Worker 的全局验收（并行文档 §23，P5+ 改为产物级 + fail-closed）。
 
-判断整批结果是否达成用户任务；不通过时给 replan_instruction 供 MasterRuntime 重规划。
-保守失败：LLM 验证异常时默认接受（不因验证器故障反复 replan）。
+依据**真实集成产物**（candidate 冻结态的改动文件 + 有界 diff + 可选确定性验收命令结果）
+判断整批是否达成用户任务，而不是只看 Worker 过程自述；不通过时给 replan_instruction。
+**提交门禁 fail-closed**：验证器不可用 / 输出不可解析 → `indeterminate`，**绝不推进真实 base**
+（宁可整个 Attempt 丢弃重开，也不放行一个未经验收的结果）。
 """
 
 from __future__ import annotations
