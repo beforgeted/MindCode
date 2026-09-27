@@ -17,6 +17,7 @@ from typing import Any
 
 from codeagent.llm.types import ToolSpec
 from codeagent.tool.base import BaseTool, ToolExecutionContext
+from codeagent.tool.deferred import DeferredAction
 from codeagent.tool.effects import EffectKind, RetryPolicy
 from codeagent.tool.models import ToolCall, ToolConcurrencyMode, ToolResult
 
@@ -61,10 +62,19 @@ class RunCommandTool(BaseTool):
         if decision.effect is EffectKind.EXTERNAL_SIDE_EFFECT:
             if not ctx.allow_external_effects:
                 # 推测执行阶段：外部副作用 candidate 回滚不了，一律禁止（应延后到验收通过后）。
+                if ctx.deferred is not None:
+                    ctx.deferred.append(
+                        DeferredAction(
+                            command=command,
+                            effect=decision.effect,
+                            retry=decision.retry,
+                            reason=decision.reason,
+                        )
+                    )
                 return ToolResult.error(
                     call,
                     f"外部副作用在推测执行阶段禁止（{decision.reason}），"
-                    f"已阻止，请改为验收通过后执行: {command}",
+                    f"已记录为待验收后处理的动作，未执行: {command}",
                 )
             if not await ctx.approval.approve(decision, command=command):
                 return ToolResult.error(call, f"外部副作用未获批准（{decision.reason}）: {command}")

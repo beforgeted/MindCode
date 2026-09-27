@@ -18,6 +18,7 @@ def _ctx(
     *,
     allow_external: bool,
     approval,
+    deferred=None,
 ) -> ToolExecutionContext:
     return ToolExecutionContext(
         agent_run_id="a",
@@ -29,7 +30,25 @@ def _ctx(
         artifact_store=artifact_store,
         allow_external_effects=allow_external,
         approval=approval,
+        deferred=deferred,
     )
+
+
+async def test_blocked_external_is_recorded_as_deferred(
+    workspace: Path, artifact_store: FileArtifactStore
+) -> None:
+    from codeagent.tool.deferred import DeferredAction
+
+    queue: list[DeferredAction] = []
+    ctx = _ctx(
+        workspace, artifact_store,
+        allow_external=False, approval=DenyExternalApprovalPolicy(), deferred=queue,
+    )
+    result = await RunCommandTool().execute(ctx, {"command": "npm publish"})
+    assert result.is_error
+    assert len(queue) == 1
+    assert queue[0].command == "npm publish"
+    assert "exitCode" not in result.content  # 未执行，只记录
 
 
 async def test_external_blocked_during_speculation(

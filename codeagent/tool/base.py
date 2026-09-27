@@ -22,6 +22,7 @@ from codeagent.infra.cancellation import CancellationToken
 from codeagent.llm.types import ToolSpec
 from codeagent.tool.approval import ApprovalPolicy, DenyExternalApprovalPolicy
 from codeagent.tool.command_policy import CommandPolicy
+from codeagent.tool.deferred import DeferredAction
 from codeagent.tool.effects import EffectKind, RetryPolicy
 from codeagent.tool.executor import CommandExecutor, LocalExecutor
 from codeagent.tool.models import ToolConcurrencyMode, ToolResult
@@ -50,6 +51,8 @@ class ToolExecutionContext:
     allow_external_effects: bool = False
     # 放行阶段的审批策略。默认 fail-safe 拒绝。
     approval: ApprovalPolicy = field(default_factory=DenyExternalApprovalPolicy)
+    # 推测期被拦下的外部副作用记录到这里（run 级队列），供 promote 后处理。None=不收集。
+    deferred: list[DeferredAction] | None = None
 
 
 @runtime_checkable

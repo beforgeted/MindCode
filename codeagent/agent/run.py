@@ -20,6 +20,7 @@ from codeagent.evidence.event_store import RawEventStore
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.infra.ids import new_agent_run_id
 from codeagent.llm.message import Message
+from codeagent.tool.deferred import DeferredAction
 from codeagent.tool.models import ToolRun
 from codeagent.workspace.context import WorkspaceContext
 
@@ -61,6 +62,8 @@ class AgentRun:
     reflection_count: int = 0
     # 推测执行阶段（Worker 在 candidate 内）为 False → 外部副作用禁止。默认安全拒绝。
     allow_external_effects: bool = False
+    # 推测期被拦下的外部副作用（供 promote 后处理）。run_command 经 scope 往这里追加。
+    deferred_actions: list[DeferredAction] = field(default_factory=list)
     _event_store: RawEventStore | None = None
 
     def __post_init__(self) -> None:

@@ -26,6 +26,7 @@ from codeagent.orchestration.run_store import NullRunStore, RunStore, StepOutcom
 from codeagent.orchestration.shared_memory import NullSupervisorMemoryWriter, SupervisorWriter
 from codeagent.orchestration.step_scheduler import SchedulerResult, StepScheduler
 from codeagent.runtime.agent_runtime import WorkerRun
+from codeagent.tool.deferred import DeferredAction
 from codeagent.workspace.context import WorkspaceContext
 from codeagent.workspace.git_worktree import GitWorktreeWorkspaceManager
 from codeagent.workspace.manager import WorkspaceManager
@@ -45,6 +46,9 @@ class FinalResult:
     replans: int = 0
     # integrated ⟺ 成功 CAS 推进真实 base（产物级验收通过）。
     integrated: bool = True
+    # 推测期被拦下的外部副作用（跨 Worker 汇总）。promote 后按 ApprovalPolicy 处理；
+    # 最小实现：非交互默认只上报、不执行。
+    deferred_actions: tuple[DeferredAction, ...] = ()
 
 
 class MasterRuntime:
@@ -156,9 +160,11 @@ class MasterRuntime:
 
         files: list[FileState] = []
         evidence: list[EvidenceRef] = []
+        deferred: list[DeferredAction] = []
         for worker in result.workers.values():
             files.extend(worker.result.files)
             evidence.extend(worker.result.evidence_refs)
+            deferred.extend(worker.run.deferred_actions)
 
         await self._run_store.update_run_status(
             master_run_id, "success" if integrated_ok else "failed"
@@ -175,6 +181,7 @@ class MasterRuntime:
             merge_conflicts=tuple(result.conflicts),
             replans=max(0, attempts - 1),
             integrated=integrated_ok,
+            deferred_actions=tuple(deferred),
         )
 
     async def _build_target(

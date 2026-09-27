@@ -109,6 +109,7 @@ class ReActEngine:
                 profile=run.profile,
                 turn_id=turn_id,
                 allow_external_effects=run.allow_external_effects,
+                deferred=run.deferred_actions,
             )
             outcome = await self._tools.execute_batch(scope, calls)
             run.context.record_tool_runs(outcome.tool_runs)

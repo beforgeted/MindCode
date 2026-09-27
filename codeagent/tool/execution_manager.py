@@ -36,6 +36,7 @@ from codeagent.infra.metrics import Metrics
 from codeagent.tool.approval import ApprovalPolicy, DenyExternalApprovalPolicy
 from codeagent.tool.base import Tool, ToolExecutionContext
 from codeagent.tool.command_policy import CommandPolicy
+from codeagent.tool.deferred import DeferredAction
 from codeagent.tool.executor import CommandExecutor, LocalExecutor
 from codeagent.tool.models import (
     ToolCall,
@@ -66,6 +67,8 @@ class ExecutionScope:
     turn_id: str | None = None
     # 推测执行阶段（Worker 在 candidate 内）为 False → 外部副作用禁止。
     allow_external_effects: bool = False
+    # 推测期被拦下的外部副作用记录到这里（run 级队列）。None=不收集。
+    deferred: list[DeferredAction] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +252,7 @@ class ToolExecutionManager:
             command_executor=self._command_executor,
             allow_external_effects=scope.allow_external_effects,
             approval=self._approval,
+            deferred=scope.deferred,
         )
         keys = _resource_keys(tool, call)
 

@@ -141,6 +141,10 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
         print("改动文件:")
         for state in final.files:
             print(f"  {state.change}: {state.path}")
+    if final.deferred_actions:
+        print("[待处理] 以下外部副作用在推测执行阶段被拦下、未执行（需人工确认后再做）:")
+        for action in final.deferred_actions:
+            print(f"  - {action.reason}: {action.command}")
     # 调试信息（非用户待办）：内部集成冲突/分支,仅供排查。
     if final.merge_conflicts:
         print(f"[调试] 内部集成冲突: {'; '.join(final.merge_conflicts)}")
