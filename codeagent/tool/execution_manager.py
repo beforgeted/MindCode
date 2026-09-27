@@ -35,6 +35,7 @@ from codeagent.infra.cancellation import CancellationToken, CancelledByUser
 from codeagent.infra.metrics import Metrics
 from codeagent.tool.base import Tool, ToolExecutionContext
 from codeagent.tool.command_policy import CommandPolicy
+from codeagent.tool.executor import CommandExecutor, LocalExecutor
 from codeagent.tool.models import (
     ToolCall,
     ToolConcurrencyMode,
@@ -84,6 +85,7 @@ class ToolExecutionManager:
         event_store: RawEventStore | None = None,
         metrics: Metrics | None = None,
         command_policy: CommandPolicy | None = None,
+        command_executor: CommandExecutor | None = None,
     ) -> None:
         self._registry = registry
         self._normalizer = normalizer
@@ -93,6 +95,7 @@ class ToolExecutionManager:
         self._events: RawEventStore = event_store or NullEventStore()
         self._metrics = metrics or Metrics()
         self._command_policy = command_policy or CommandPolicy()
+        self._command_executor = command_executor or LocalExecutor()
 
     async def execute_batch(
         self, scope: ExecutionScope, calls: Sequence[ToolCall]
@@ -238,6 +241,7 @@ class ToolExecutionManager:
             max_output_bytes=scope.profile.max_tool_output_bytes,
             timeout_seconds=scope.profile.tool_timeout_seconds,
             command_policy=self._command_policy,
+            command_executor=self._command_executor,
         )
         keys = _resource_keys(tool, call)
 

@@ -22,6 +22,7 @@ from codeagent.infra.cancellation import CancellationToken
 from codeagent.llm.types import ToolSpec
 from codeagent.tool.command_policy import CommandPolicy
 from codeagent.tool.effects import EffectKind, RetryPolicy
+from codeagent.tool.executor import CommandExecutor, LocalExecutor
 from codeagent.tool.models import ToolConcurrencyMode, ToolResult
 from codeagent.workspace.context import WorkspaceContext
 
@@ -42,6 +43,8 @@ class ToolExecutionContext:
     timeout_seconds: float = 60.0
     # 命令分类策略（run_command 用）。默认内置规则；session 装配时可注入配置化实例。
     command_policy: CommandPolicy = field(default_factory=CommandPolicy)
+    # 命令执行器（run_command 用）。默认本机执行器；可换 SandboxExecutor。
+    command_executor: CommandExecutor = field(default_factory=LocalExecutor)
 
 
 @runtime_checkable

@@ -1,39 +1,30 @@
-"""run_command：流式落 artifact + 有界返回。
+"""run_command：分类 → 守卫 → 交 CommandExecutor（Phase 7c 起变薄）。
 
-这是 P1 的核心实现细节。**必须**边读子进程输出边往 artifact 写，
-不能先在内存里攒完整个 buffer 再交给 Normalizer —— 否则"单条 300K token
-输出"在进 Normalizer 之前就已经把内存吃掉了。
+工具本身只负责：命令分类（CommandPolicy）、守卫（拒危险命令）、组装 ToolResult。
+真正的 spawn / 流式落 artifact / 进程树终止 / env 过滤在 CommandExecutor（executor.py）。
 
-内存里只保留 head/tail 两段有界预览，完整输出在 artifact 里，
-需要时用 read_artifact 回读（JIT 取证）。
+无界输出仍是**主防线**：executor 边读边落 artifact，内存只留 head/tail 预览，
+需要细节用 read_artifact 回读（JIT 取证）。
 
-安全说明：这个工具执行的是模型给出的任意 shell 命令，是整个 Agent 最大的
-风险面。当前只挡掉了几个明显灾难性的命令，**没有**权限确认机制 ——
-真正的 gating（用户确认 / 命令白名单 / 沙箱）属于 CLI 层，尚未实现。
-在不受信任的环境里跑之前必须先补上。
+安全说明：执行模型给出的 shell 是最大风险面。7b 起用 CommandPolicy 分类、拒明显危险命令；
+7c 起 env 过滤 + 进程树终止；external 副作用的推测期禁止/审批见 7d。完整容器沙箱（SandboxExecutor）
+尚未实现——在完全不受信任的环境仍需补沙箱。
 """
 
 from __future__ import annotations
 
-import asyncio
-from collections import deque
 from typing import Any
 
-from codeagent.infra.cancellation import CancelledByUser
-from codeagent.infra.text import TRUNCATION_MARKER
 from codeagent.llm.types import ToolSpec
 from codeagent.tool.base import BaseTool, ToolExecutionContext
 from codeagent.tool.effects import EffectKind, RetryPolicy
 from codeagent.tool.models import ToolCall, ToolConcurrencyMode, ToolResult
 
-_CHUNK = 64 * 1024
-_PREVIEW_BYTES = 128 * 1024
-
 
 class RunCommandTool(BaseTool):
     concurrency_mode = ToolConcurrencyMode.SERIAL
     # 类属性是**保守默认**：任意 shell 命令按"改工作区、不可安全重放"对待。
-    # 真实的按命令分类（read_only / workspace_write / external）由 CommandPolicy 在 7b 完成。
+    # 真实的按命令分类（read_only / workspace_write / external）由 CommandPolicy 完成。
     effect_kind = EffectKind.WORKSPACE_WRITE
     retry_policy = RetryPolicy.NEVER
 
@@ -73,85 +64,25 @@ class RunCommandTool(BaseTool):
         except PermissionError as exc:
             return ToolResult.error(call, str(exc))
 
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(cwd),
-        )
-
-        head = bytearray()
-        tail: deque[bytes] = deque()
-        tail_bytes = 0
-        total = 0
-        capped = False
-
-        metadata = {"command": command, "cwd": str(cwd)}
-        try:
-            async with ctx.artifact_store.open_writer("tool-results", metadata=metadata) as writer:
-                assert proc.stdout is not None
-                while True:
-                    if ctx.cancellation.cancelled:
-                        _kill(proc)
-                        raise CancelledByUser("run_command cancelled")
-                    chunk = await proc.stdout.read(_CHUNK)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total <= ctx.max_output_bytes:
-                        await writer.write(chunk)
-                    else:
-                        capped = True
-                    if len(head) < _PREVIEW_BYTES:
-                        head.extend(chunk[: _PREVIEW_BYTES - len(head)])
-                    tail.append(chunk)
-                    tail_bytes += len(chunk)
-                    while tail_bytes - len(tail[0]) >= _PREVIEW_BYTES:
-                        tail_bytes -= len(tail.popleft())
-                artifact = writer.ref
-            exit_code = await proc.wait()
-        except CancelledByUser:
-            _kill(proc)
-            raise
-        except asyncio.CancelledError:
-            _kill(proc)
-            raise
-
-        content = _preview(bytes(head), b"".join(tail), total, capped, ctx.max_output_bytes)
-        status_line = f"$ {command}\nexitCode: {exit_code}  输出 {total} 字节"
-        result_text = f"{status_line}\n{content}" if content else status_line
-
-        factory = ToolResult.ok if exit_code == 0 else ToolResult.error
-        return factory(
-            call,
-            result_text,
-            exit_code=exit_code,
-            artifact=artifact,
-            raw_bytes=total,
-            truncated=total > len(head) + len(b"".join(tail)),
+        metadata = {"command": command, "cwd": str(cwd), "effect": str(decision.effect)}
+        outcome = await ctx.command_executor.run(
+            command=command,
+            cwd=cwd,
+            cancellation=ctx.cancellation,
+            artifact_store=ctx.artifact_store,
+            max_output_bytes=ctx.max_output_bytes,
             metadata=metadata,
         )
 
-
-def _kill(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is None:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-
-
-def _preview(head: bytes, tail: bytes, total: int, capped: bool, cap: int) -> str:
-    notes = []
-    if capped:
-        notes.append(f"[输出超过 {cap} 字节上限，artifact 只保存了前 {cap} 字节]")
-    if total <= len(head):
-        body = head.decode("utf-8", errors="replace")
-    else:
-        omitted = total - len(head) - len(tail)
-        body = (
-            head.decode("utf-8", errors="replace")
-            + f"\n{TRUNCATION_MARKER.format(omitted=max(0, omitted))}\n"
-            + tail.decode("utf-8", errors="replace")
+        status_line = f"$ {command}\nexitCode: {outcome.exit_code}  输出 {outcome.total_bytes} 字节"
+        result_text = f"{status_line}\n{outcome.content}" if outcome.content else status_line
+        factory = ToolResult.ok if outcome.exit_code == 0 else ToolResult.error
+        return factory(
+            call,
+            result_text,
+            exit_code=outcome.exit_code,
+            artifact=outcome.artifact,
+            raw_bytes=outcome.total_bytes,
+            truncated=outcome.truncated,
+            metadata=metadata,
         )
-    return ("\n".join(notes) + "\n" + body) if notes else body
