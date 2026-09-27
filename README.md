@@ -20,10 +20,12 @@ python -m codeagent.cli.app --workspace /path/to/repo
 ```
 
 REPL 命令：`/context` `/compact` `/memory add|list|search|show|delete|harvest`
-`/task <目标>` `/clear` `/metrics` `/quit`。`/task` 走 P5 Multi-Agent：规划 → 并行 Worker
-（git 仓库下各自 worktree 隔离，非 git 回退只读并行+写串行）→ 验收 → 合并回 base。
-`/task --resume <mrun_id>` 走 P6 恢复：跳过已完成 Step，只重跑未完成的（打印出的
-`master_run_id` 即恢复句柄）。
+`/task <目标>` `/clear` `/metrics` `/quit`。`/task` 走事务化 Multi-Agent：规划 → 并行 Worker
+（各自 git worktree 隔离，集成进 candidate 而非真实 base）→ 依赖门控/过期重跑/Integrator 兜底
+自愈冲突 → **产物级全局验收** → 通过才 **CAS 原子推进真实 base**，否则整个 Attempt 丢弃、从
+起点重开（用户只看到"任务完成/未完成"，不接触 git 冲突）。非 git 环境回退只读并行+写串行。
+`/task --resume <mrun_id>` 恢复：未 promote 的 run 从干净 Attempt 整体重开（副作用不可信重放）。
+可选 `CODEAGENT_VERIFY_CMD` 指定确定性验收命令，在独立 validation worktree 运行。
 
 Memory 示例：
 
@@ -77,16 +79,23 @@ pyright             # 类型
 | P5 StepScheduler（pending-set 增量派发，非 barrier） | `orchestration/step_scheduler.py` |
 | P5 Workspace 隔离（git worktree / 非 git 回退） | `workspace/manager.py`、`workspace/git_worktree.py` |
 | P5 MasterRuntime（plan→schedule→verify→replan→merge→cleanup） | `orchestration/master_runtime.py`、`orchestration/master_session.py` |
+| P5+ 事务化集成：依赖门控（integrated 才解锁后继） | `orchestration/step_scheduler.py`、`orchestration/integration_coordinator.py` |
+| P5+ 乐观并发：base_revision + 读/写集重叠检测 → 过期即最新基线重跑 | `orchestration/integration_coordinator.py`、`workspace/git_worktree.py` |
+| P5+ Integrator 兜底（带冲突现场的增强指令重跑） | `orchestration/integrator.py` |
+| P5+ Master Attempt Transaction（candidate 隔离 + 产物级验收 + CAS 原子 promote + fail-closed） | `orchestration/master_runtime.py`、`orchestration/global_verifier.py`、`workspace/git_worktree.py` |
 | P6 资源锁清理（引用计数驱逐） | `tool/resource_lock.py` |
-| P6 Run 持久化/恢复（跳过已完成 Step，`/task --resume`） | `orchestration/run_store.py`、`orchestration/master_runtime.py` |
+| P6 Run 持久化/恢复（事务式，未 promote 即整体重开，`/task --resume`） | `orchestration/run_store.py`、`orchestration/master_runtime.py` |
 | P6 共享 Memory（Worker 产候选，Supervisor 集中 staging） | `orchestration/shared_memory.py`、`memory/sqlite_store.py` |
 | P6 专项 Agent MemoryProfile（读写边界） | `agent/models.py`、`context/manager.py`、`memory/retriever.py` |
 
 ## 未实现（按分期）
 
-- **P5/P6 验证缺口**：真实模型 Planner/Verifier benchmark、并行写隔离的大规模压测；
-  跨进程 worktree/branch 的完整崩溃恢复（当前恢复深度=跳过已完成 Step）；
-  Worker 候选自动抽取器（`AgentRuntime.candidate_harvester`）的默认接线。
+- **验证缺口**：真实模型 Planner/Verifier 大规模 benchmark；跨进程 verify/promote 中途崩溃的
+  精细断点恢复（当前为"未 promote 即整体重开"）；Worker 候选自动抽取器
+  （`AgentRuntime.candidate_harvester`）的默认接线。
+- **外部副作用隔离**：Master Attempt 的 candidate 只隔离仓库内文件；Worker 的外部副作用
+  （API/DB/树外写/发布/`run_command` 写绝对路径）不被事务覆盖，需后续用幂等键 / 两阶段提交 /
+  延后执行 / 不可重试标注治理（属 `run_command` sandbox 缺口）。
 
 P2/P3/P4/P5 都采用保守失败：压缩失败不替换 History，Memory 检索失败不阻断对话，
 Judge/治理链失败宁可不写长期 Memory，Planner/Verifier 失败退化/放行不卡编排，

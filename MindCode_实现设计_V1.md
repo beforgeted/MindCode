@@ -229,6 +229,44 @@ Planner/Verifier 可注入（真实模型走 LLM 实现、stub 走确定性实�
 `test_workspace_manager.py`、`test_master_runtime.py`、`test_orchestration_llm.py`、
 `test_master_integration.py`（真实 git + ReActEngine 端到端并行写→合并）。
 
+### P5+ 事务化多 Agent 集成（真实 LLM 测试后重构，最终形态）
+
+真实 LLM 压测暴露出"末尾大合并"模型的结构缺陷（详见知识库《测试问题与解决方案》001–006），
+据此把多 Agent 集成重构为**事务化 + 分层收敛**。核心裁决：**子 Agent 之间的冲突/过期是运行时
+内部一致性问题，由系统自愈，用户只看到"任务完成/失败"，绝不把 git 操作或分支交给用户。**
+真正目标是"检测过期的推测执行，在最新一致基线上自动收敛"，git 冲突只是最易发现的一种表现。
+
+四层收敛，逐级升级、各有预算，兜底绝不破坏不变式：
+
+1. **依赖门控**：`StepScheduler` 的 readiness 以 **integrated（已并回 base）** 为准，不是本地验收。
+   后继只有在前驱 INTEGRATED 后才派发，其 worktree 从含前驱改动的最新基线切出 → 依赖型后继
+   不再在过期代码上工作。集成串行、按 step order 确定序（`IntegrationCoordinator`）。
+2. **乐观并发 + 原指令重跑**（Phase 2）：`WorkspaceContext.base_revision` 记录起点；集成时若基线
+   已动过且与本步**写集（git diff 权威）∪读集（tool_runs 提取；用过 run_command 读集视为未知）**
+   有重叠 → 判 **stale**，丢弃过期 worktree、在最新基线**原指令重跑**（`agent_max_reruns` 默认 2）。
+   读/写重叠也算过期（git 不冲突但依赖了被改行为的语义过期，最隐蔽）。
+3. **Integrator 兜底**（Phase 3，`orchestration/integrator.py`）：重跑预算耗尽仍过期 →
+   `InstructionIntegrator` 生成**带冲突现场的增强指令**再跑一次（`agent_max_integrations` 默认 1），
+   让 Worker 先读现状再与已集成改动协调。产物仍进 candidate、仍经全局验收，绝不绕过。
+4. **Master Attempt Transaction**（`master_runtime.py`）：**每次 Attempt 一个 candidate**（从固定
+   `original_base` 切）；Worker 从 candidate 切、增量集成都进 candidate，**不碰真实 base**；冻结
+   candidate_sha → **产物级全局验收**（`GlobalVerifier` 拿 `VerificationTarget`：改动文件 + 有界
+   diff + 可选 `CODEAGENT_VERIFY_CMD` 在独立 validation worktree 的结果，不再只看过程摘要）→
+   accept 才 **CAS 原子推进**（真实 base HEAD 仍等于 `original_base` 才 `merge --ff-only`，否则
+   BASE_STALE 安全拒绝）；reject/indeterminate/有失败 → **丢弃整个 Attempt，从 original_base 重开**。
+   **提交门禁 fail-closed**：验证器不可用/不可解析 = indeterminate，绝不推进（删掉旧的
+   `except→accept=True`）。
+
+**关键不变式**：任何未过产物级验收的结果都不落 base；集成串行且确定（可复现/可调试）；失败即
+整体丢弃回到 original_base（非幂等副作用不叠加）；validation 在冻结快照上跑（消除 TOCTOU）。
+**边界**：candidate 只隔离**仓库内文件**；外部副作用（API/DB/树外写/发布/run_command 写绝对路径）
+不被隔离，属 run_command sandbox 缺口，后续再治（幂等键/两阶段提交/不可重试标注）。
+
+✅ 已完成并真实 LLM 压测通过（依赖链 / 并行重叠收敛 / 强冲突 Integrator 合一 / 验收失败 base 不动
+四场景全绿）。测试见 `tests/test_step_scheduler.py`（门控 + Integrator 兜底收敛）、
+`test_master_integration.py`（candidate→promote、base 移动拒绝推进、过期丢弃 base 不变、
+收敛、fail-closed 不推进）、`test_workspace_manager.py`（candidate/promote CAS）。
+
 ### P6 收尾（已完成）
 
 `ResourceLockManager` 锁表清理、Run 持久化与恢复、Multi-Agent 共享 Memory
@@ -237,12 +275,10 @@ Planner/Verifier 可注入（真实模型走 LLM 实现、stub 走确定性实�
 
 - **锁表清理**：`tool/resource_lock.py` 引用计数驱逐——每个 key 在 `await acquire()`
   前 `+1`、释放后 `-1`，计数归零且锁空闲即删除，长跑进程不再泄漏。
-- **Run 持久化/恢复**（深度=跳过已完成 Step）：`orchestration/run_store.py`
-  （`SqliteRunStore`/`NullRunStore`）持久化 **planned graph 的 JSON** 与每个
-  `step_outcome`。`MasterRuntime.run(..., resume_master_run_id=...)` 重建图、跳过已完成
-  Step 只重跑未完成的；`StepScheduler.run` 增 `skip` 与 `on_step_complete`（每步完成即
-  落库，崩溃安全）。CLI：`/task --resume <mrun_id>`。**跨进程 worktree/branch 的完整崩溃
-  恢复不在本期范围**（已完成 Step 视为已集成，不再重合并）。
+- **Run 持久化/恢复**：`orchestration/run_store.py`（`SqliteRunStore`/`NullRunStore`）持久化
+  **planned graph 的 JSON** 与每个 `step_outcome`。`MasterRuntime.run(..., resume_master_run_id=...)`
+  重建图后重跑。**注**：事务化重构后（P5+），resume 语义改为"未 promote 的 run 一律从干净 Attempt
+  重开整张图"——副作用步骤不可信重放，不再做"跳过已完成 Step"的部分恢复。CLI：`/task --resume`。
 - **共享 Memory**：`orchestration/shared_memory.py` 的 `SupervisorMemoryWriter` 在 merge 后
   汇总各 Worker 的 `AgentRunResult.memory_candidates`，按 `candidate_key` 去重、按产出
   Agent 的 `MemoryProfile.writable_types` 过滤越界候选，集中 staging 到候选表
