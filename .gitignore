@@ -9,5 +9,6 @@ build/
 .ruff_cache/
 .codeagent/
 .env
-# 测试场景套件只存活在 test/scenarios 分支，main 不跟踪（避免推送主分支时带上）
-scenarios/
+# 场景套件是 main 的正式资产；仅忽略其运行产物（真实 LLM 结果明细）
+scenarios/last_report.json
+scenarios/__pycache__/
