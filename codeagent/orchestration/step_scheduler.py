@@ -26,6 +26,7 @@ from codeagent.infra.metrics import Metrics
 from codeagent.orchestration.integration_coordinator import IntegrationCoordinator
 from codeagent.orchestration.task_graph import Step, TaskGraph
 from codeagent.runtime.agent_runtime import AgentRuntime, WorkerRun
+from codeagent.workspace.context import WorkspaceContext
 
 # 集成后回调：记录 (step_id, worker, integrated)。integrated=False 表示执行/验收/集成任一失败。
 StepCallback = Callable[[str, WorkerRun, bool], Awaitable[None]]
@@ -72,10 +73,13 @@ class StepScheduler:
         trace_id: str | None = None,
         skip: frozenset[str] | set[str] = frozenset(),
         on_step_complete: StepCallback | None = None,
+        candidate: WorkspaceContext | None = None,
     ) -> SchedulerResult:
         semaphore = asyncio.Semaphore(self._max_concurrency)
         write_lock = asyncio.Lock()
         step_order = {step.id: i for i, step in enumerate(graph.steps)}
+        # Worker 从 candidate 分支切出（其 tip 随集成前进 → 后继自然见前驱改动）。
+        base_ref = candidate.branch_name if candidate is not None else None
 
         integrated: set[str] = set(skip)  # 恢复：已集成的 Step 视为满足依赖,不重跑
         completed: set[str] = set(skip)
@@ -102,7 +106,7 @@ class StepScheduler:
                 dispatched.add(step.id)
                 task = asyncio.create_task(
                     self._run_step(
-                        step, session_id, semaphore, write_lock, cancellation, trace_id
+                        step, session_id, semaphore, write_lock, cancellation, trace_id, base_ref
                     )
                 )
                 running[task] = step.id
@@ -113,7 +117,7 @@ class StepScheduler:
                 pending.sort(key=lambda sid: step_order.get(sid, 1 << 30))
                 step_id = pending.pop(0)
                 worker = workers[step_id]
-                outcome = await self._coordinator.integrate(worker)
+                outcome = await self._coordinator.integrate(worker, candidate)
                 if outcome.integrated:
                     integrated.add(step_id)
                     if outcome.branch:
@@ -171,6 +175,7 @@ class StepScheduler:
         write_lock: asyncio.Lock,
         cancellation: CancellationToken | None,
         trace_id: str | None,
+        base_ref: str | None,
     ) -> WorkerRun:
         definition = self._registry.get(step.agent_id)
         async with semaphore:
@@ -182,6 +187,7 @@ class StepScheduler:
                         session_id=session_id,
                         cancellation=cancellation,
                         trace_id=trace_id,
+                        base_ref=base_ref,
                     )
             return await self._runtime.run(
                 definition,
@@ -189,4 +195,5 @@ class StepScheduler:
                 session_id=session_id,
                 cancellation=cancellation,
                 trace_id=trace_id,
+                base_ref=base_ref,
             )

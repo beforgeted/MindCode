@@ -75,9 +75,10 @@ class AgentRuntime:
         session_id: str,
         cancellation: CancellationToken | None = None,
         trace_id: str | None = None,
+        base_ref: str | None = None,
     ) -> WorkerRun:
         run_id = new_agent_run_id()
-        workspace = await self._wsm.create(run_id)
+        workspace = await self._wsm.create(run_id, base_ref=base_ref)
         run = AgentRun(
             definition=definition,
             session_id=session_id,

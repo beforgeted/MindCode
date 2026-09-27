@@ -71,15 +71,46 @@ async def test_git_worktree_create_and_cleanup(tmp_path: Path):
 
 
 @pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
-async def test_git_worktree_merge_back_to_base(tmp_path: Path):
+async def test_git_candidate_merge_and_promote(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_repo(repo)
     manager = await build_workspace_manager(repo, isolation="auto")
     assert isinstance(manager, GitWorktreeWorkspaceManager)
-    ws = await manager.create("run_merge")
-    # 在 worktree 分支上提交一处改动。
+    original = await manager.base_revision()
+    # candidate 从 original 切;Worker 从 candidate 切、提交、并回 candidate。
+    candidate = await manager.create_candidate(original)
+    ws = await manager.create("run_merge", base_ref=candidate.branch_name)
     _commit_file(ws.root, "worker.txt", "hello\n")
-    await manager.merge(ws)
-    assert (repo / "worker.txt").exists()  # 已合并回 base
+    await manager.merge_into(candidate, ws)
+    # 此时真实 base 尚未变化。
+    assert not (repo / "worker.txt").exists()
+    assert await manager.base_revision() == original
+    # 冻结 candidate 并 CAS 推进真实 base。
+    candidate_sha = await manager.head(candidate.root)
+    assert await manager.promote(candidate_sha, expected_base=original) is True
+    assert (repo / "worker.txt").exists()
     await manager.cleanup(ws)
+    await manager.cleanup(candidate)
+
+
+@pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
+async def test_promote_refuses_when_base_moved(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    manager = await build_workspace_manager(repo, isolation="auto")
+    assert isinstance(manager, GitWorktreeWorkspaceManager)
+    original = await manager.base_revision()
+    candidate = await manager.create_candidate(original)
+    ws = await manager.create("run_x", base_ref=candidate.branch_name)
+    _commit_file(ws.root, "worker.txt", "hi\n")
+    await manager.merge_into(candidate, ws)
+    candidate_sha = await manager.head(candidate.root)
+    # 验证期间真实 base 被外部推进 → CAS 应安全拒绝,不覆盖外部提交。
+    _commit_file(repo, "external.txt", "outside\n")
+    assert await manager.promote(candidate_sha, expected_base=original) is False
+    assert not (repo / "worker.txt").exists()  # 未强推
+    assert (repo / "external.txt").exists()  # 外部提交保留
+    await manager.cleanup(ws)
+    await manager.cleanup(candidate)

@@ -30,7 +30,7 @@ class CountingRuntime:
         self.ran: list[str] = []
 
     async def run(
-        self, definition, step, *, session_id, cancellation=None, trace_id=None
+        self, definition, step, *, session_id, cancellation=None, trace_id=None, base_ref=None
     ) -> WorkerRun:
         self.ran.append(step.id)
         run = AgentRun.create(
@@ -114,11 +114,14 @@ async def test_null_run_store_is_noop():
     assert await store.load_run("x") is None
 
 
-async def test_resume_skips_completed_steps(tmp_path: Path):
+async def test_resume_reruns_whole_attempt(tmp_path: Path):
+    """事务语义下的 resume：未 promote 的 run 一律从干净 Attempt 重开,不做部分跳过。
+
+    副作用步骤不可信重放,所以恢复 = 重新尝试整张图（不是跳过已执行步骤）。
+    """
     store = SqliteRunStore(tmp_path / "runs.db")
     await store.start()
     graph = _graph()
-    # 模拟上次跑到一半崩溃：graph 已落库，step a 已完成。
     await store.save_run(
         master_run_id="mrun_x", session_id="s", task="做 A 再做 B", graph=graph, status="running"
     )
@@ -137,10 +140,8 @@ async def test_resume_skips_completed_steps(tmp_path: Path):
     final = await master.run("做 A 再做 B", session_id="s", resume_master_run_id="mrun_x")
 
     assert final.accepted
-    assert runtime.ran == ["b"]  # a 被跳过，只重跑 b
+    assert sorted(runtime.ran) == ["a", "b"]  # 整张图重跑,不做部分跳过
     assert final.scheduler is not None
-    assert final.scheduler.completed == {"a", "b"}
-    # 聚合含跳过的 a（来自持久化）与新跑的 b。
-    assert {f.path for f in final.files} == {"a.py", "b.py"}
+    assert final.scheduler.integrated == {"a", "b"}
     record = await store.load_run("mrun_x")
     assert record is not None and record.status == "success"

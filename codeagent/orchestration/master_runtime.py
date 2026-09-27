@@ -1,11 +1,15 @@
-"""MasterRuntime：编排闭环 plan → (schedule+integrate) → verify →（replan）→ cleanup。
+"""MasterRuntime：Master Attempt Transaction —— 每次尝试一个 candidate，产物级验收，
+CAS 原子推进真实 base，否则丢弃整个 Attempt 从 original_base 重开。
 
-集成不再是末尾的一次性大合并：它已被编进 StepScheduler 的执行环（验收即串行集成,
-后继只有在前驱 INTEGRATED 后才派发,见 step_scheduler / integration_coordinator）。
-MasterRuntime 只负责：规划、驱动调度、集成后的全局验收与重规划、以及 cleanup。
+为什么：并行子 Agent 的集成必须是事务。若直接改真实 base、reject 后在已改 base 上重跑,
+非幂等副作用会重复叠加（知识文档 004）。所以：
+- 固定 original_base（run 开始时真实 base HEAD）。
+- 每个 Attempt：建 candidate（从 original_base）→ 调度（Worker 从 candidate 切、集成进 candidate）
+  → 冻结 candidate_sha → 产物级验收 → accept 则 CAS `merge --ff-only` 推进真实 base；
+  reject/indeterminate 丢弃整个 Attempt、下一 Attempt 从 original_base 重开。
+- 提交门禁 fail-closed：验证器不可用/不可解析 = indeterminate，绝不推进真实 base。
 
-cleanup 所有权仍在这里：**已集成**的 worktree 才回收;未集成（失败/冲突）的保留作证据,
-也便于 resume。
+边界：candidate 只隔离**仓库内文件**;外部副作用（API/DB/树外写/发布）不被隔离,见文档 004。
 """
 
 from __future__ import annotations
@@ -16,15 +20,14 @@ from codeagent.agent.models import FileState
 from codeagent.evidence.models import EvidenceRef
 from codeagent.infra.ids import new_id
 from codeagent.infra.metrics import Metrics
-from codeagent.orchestration.global_verifier import GlobalVerifier
+from codeagent.orchestration.global_verifier import GlobalVerifier, VerificationTarget
 from codeagent.orchestration.planner import Planner
 from codeagent.orchestration.run_store import NullRunStore, RunStore, StepOutcome
-from codeagent.orchestration.shared_memory import (
-    NullSupervisorMemoryWriter,
-    SupervisorWriter,
-)
+from codeagent.orchestration.shared_memory import NullSupervisorMemoryWriter, SupervisorWriter
 from codeagent.orchestration.step_scheduler import SchedulerResult, StepScheduler
 from codeagent.runtime.agent_runtime import WorkerRun
+from codeagent.workspace.context import WorkspaceContext
+from codeagent.workspace.git_worktree import GitWorktreeWorkspaceManager
 from codeagent.workspace.manager import WorkspaceManager
 
 
@@ -40,7 +43,7 @@ class FinalResult:
     merged_branches: tuple[str, ...] = ()
     merge_conflicts: tuple[str, ...] = ()
     replans: int = 0
-    # accepted 反映全局验收；integrated 还要求全部 Step 已干净并回 base（无失败/冲突）。
+    # integrated ⟺ 成功 CAS 推进真实 base（产物级验收通过）。
     integrated: bool = True
 
 
@@ -53,6 +56,7 @@ class MasterRuntime:
         global_verifier: GlobalVerifier,
         workspace_manager: WorkspaceManager,
         max_replans: int = 1,
+        verify_command: str | None = None,
         memory_writer: SupervisorWriter | None = None,
         run_store: RunStore | None = None,
         metrics: Metrics | None = None,
@@ -62,6 +66,7 @@ class MasterRuntime:
         self._verifier = global_verifier
         self._wsm = workspace_manager
         self._max_replans = max(0, max_replans)
+        self._verify_command = verify_command
         self._memory_writer = memory_writer or NullSupervisorMemoryWriter()
         self._run_store = run_store or NullRunStore()
         self._metrics = metrics or Metrics()
@@ -75,72 +80,78 @@ class MasterRuntime:
         resume_master_run_id: str | None = None,
     ) -> FinalResult:
         self._metrics.incr("master.runs")
+        git = self._wsm if isinstance(self._wsm, GitWorktreeWorkspaceManager) else None
 
-        precompleted: dict[str, StepOutcome] = {}
-        skip: set[str] = set()
         if resume_master_run_id is not None:
             record = await self._run_store.load_run(resume_master_run_id)
             if record is None:
                 raise ValueError(f"找不到可恢复的 master run: {resume_master_run_id}")
             self._metrics.incr("master.resumes")
-            master_run_id = record.master_run_id
-            task = record.task
-            graph = record.graph
-            # 只跳过**已集成**的 Step；执行过但未集成的必须重跑（其分支可能已过期）。
-            precompleted = {sid: o for sid, o in record.outcomes.items() if o.integrated}
-            skip = set(precompleted)
-            await self._run_store.update_run_status(master_run_id, "running")
+            master_run_id, task, graph = record.master_run_id, record.task, record.graph
         else:
             master_run_id = new_id("mrun")
             graph = await self._planner.plan(task)
-            await self._run_store.save_run(
-                master_run_id=master_run_id,
-                session_id=session_id,
-                task=task,
-                graph=graph,
-                status="running",
-            )
-
-        result: SchedulerResult | None = None
-        verdict = None
-        replans = 0
-        current_task = task
+        original_base = await git.base_revision() if git else None
+        await self._run_store.save_run(
+            master_run_id=master_run_id, session_id=session_id, task=task,
+            graph=graph, status="running",
+        )
 
         async def _checkpoint(step_id: str, worker: WorkerRun, integrated: bool) -> None:
             await self._run_store.record_step(
                 master_run_id, _to_outcome(step_id, worker, integrated)
             )
 
-        while True:
-            # 调度内部已完成"验收即串行集成";返回时 integrated 集合即已并回 base 的 Step。
-            result = await self._scheduler.run(
-                graph,
-                session_id=session_id,
-                cancellation=cancellation,
-                trace_id=master_run_id,
-                skip=frozenset(skip),
-                on_step_complete=_checkpoint,
+        max_attempts = self._max_replans + 1
+        current_task, attempts = task, 0
+        result: SchedulerResult | None = None
+        verdict = None
+        integrated_ok = False
+        reason = ""
+
+        while attempts < max_attempts:
+            attempts += 1
+            candidate = (
+                await git.create_candidate(original_base)
+                if git and original_base is not None
+                else None
             )
-            # 全局验收发生在集成之后,针对真实集成产物（此处 result 的 failed 已含集成失败）。
-            verdict = await self._verifier.verify(current_task, graph, result)
-            if verdict.accept or replans >= self._max_replans:
+            result = await self._scheduler.run(
+                graph, session_id=session_id, cancellation=cancellation,
+                trace_id=master_run_id, on_step_complete=_checkpoint, candidate=candidate,
+            )
+            candidate_sha = await git.head(candidate.root) if (git and candidate) else None
+            target = await self._build_target(git, original_base, candidate_sha)
+            verdict = await self._verifier.verify(current_task, graph, result, target)
+
+            steps_ok = not result.failed and not result.blocked
+            accept = verdict.accept and not verdict.indeterminate and steps_ok
+
+            if accept and git and candidate_sha and original_base is not None:
+                promoted = await git.promote(candidate_sha, expected_base=original_base)
+                await self._discard_attempt(candidate, result)
+                if promoted:
+                    integrated_ok, reason = True, verdict.reason
+                    break
+                reason = "真实 base 被外部推进(BASE_STALE)，已放弃本次推进"
+                original_base = await git.base_revision()  # 刷新后重试
+                continue
+            if accept and not git:
+                integrated_ok, reason = True, verdict.reason
                 break
-            replans += 1
+
+            # reject / indeterminate / 有失败 Step → 丢弃整个 Attempt,从 original_base 重开
+            reason = verdict.reason or (
+                "验证器不可用" if verdict.indeterminate else "存在未完成 Step"
+            )
+            await self._discard_attempt(candidate, result)
+            if attempts >= max_attempts:
+                break
             self._metrics.incr("master.replans")
             current_task = verdict.replan_instruction or task
             graph = await self._planner.plan(current_task)
-            await self._run_store.save_run(
-                master_run_id=master_run_id,
-                session_id=session_id,
-                task=current_task,
-                graph=graph,
-                status="running",
-            )
-            skip = set()  # 重规划后图已变,不再沿用旧 skip 集合
 
         assert result is not None and verdict is not None
-        await self._cleanup(result)
-        # Supervisor 集中 staging Worker 产出的 MemoryCandidate（Worker 从不直写）。
         await self._memory_writer.collect_and_stage(result.workers)
 
         files: list[FileState] = []
@@ -148,35 +159,65 @@ class MasterRuntime:
         for worker in result.workers.values():
             files.extend(worker.result.files)
             evidence.extend(worker.result.evidence_refs)
-        for outcome in precompleted.values():
-            files.extend(outcome.files)
-            evidence.extend(outcome.evidence_refs)
 
-        integrated_ok = verdict.accept and not result.failed and not result.conflicts
         await self._run_store.update_run_status(
             master_run_id, "success" if integrated_ok else "failed"
         )
-
         return FinalResult(
             task=task,
-            accepted=verdict.accept,
-            reason=verdict.reason,
+            accepted=integrated_ok,
+            reason=reason,
             master_run_id=master_run_id,
             scheduler=result,
             files=tuple(files),
             evidence_refs=tuple(evidence),
             merged_branches=tuple(result.integrated_branches),
             merge_conflicts=tuple(result.conflicts),
-            replans=replans,
+            replans=max(0, attempts - 1),
             integrated=integrated_ok,
         )
 
-    async def _cleanup(self, result: SchedulerResult) -> None:
-        for step_id, worker in result.workers.items():
-            # 已集成的才回收;未集成（失败/冲突）保留 worktree 与分支作证据、便于 resume。
-            keep = step_id not in result.integrated
+    async def _build_target(
+        self,
+        git: GitWorktreeWorkspaceManager | None,
+        original_base: str | None,
+        candidate_sha: str | None,
+    ) -> VerificationTarget | None:
+        if git is None or original_base is None or candidate_sha is None:
+            return None
+        changed = await git.changed_files(original_base, candidate_sha)
+        diff = await git.diff_text(original_base, candidate_sha)
+        det_ok: bool | None = None
+        det_detail = ""
+        if self._verify_command:
+            val = await git.create_validation(candidate_sha)
             try:
-                await self._wsm.cleanup(worker.workspace, keep=keep)
+                code, out = await git.run_check(val.root, self._verify_command)
+                det_ok = code == 0
+                if not det_ok:
+                    det_detail = out[-2000:]
+            finally:
+                await git.cleanup(val, keep=False)
+        return VerificationTarget(
+            revision=candidate_sha,
+            changed_files=tuple(sorted(changed)),
+            diff=diff,
+            deterministic_ok=det_ok,
+            deterministic_detail=det_detail,
+        )
+
+    async def _discard_attempt(
+        self, candidate: WorkspaceContext | None, result: SchedulerResult
+    ) -> None:
+        """一次性回收本 Attempt 的所有 worktree/branch（Worker + candidate）。"""
+        for worker in result.workers.values():
+            try:
+                await self._wsm.cleanup(worker.workspace, keep=False)
+            except Exception:
+                self._metrics.incr("master.cleanup_failures")
+        if candidate is not None:
+            try:
+                await self._wsm.cleanup(candidate, keep=False)
             except Exception:
                 self._metrics.incr("master.cleanup_failures")
 

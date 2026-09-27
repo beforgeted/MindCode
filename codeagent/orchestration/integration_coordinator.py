@@ -51,38 +51,43 @@ class IntegrationCoordinator:
         self._wsm = workspace_manager
         self._metrics = metrics or Metrics()
 
-    async def integrate(self, worker: WorkerRun) -> IntegrationOutcome:
+    async def integrate(
+        self, worker: WorkerRun, candidate: object | None = None
+    ) -> IntegrationOutcome:
+        from codeagent.workspace.context import WorkspaceContext
+
         ws = worker.workspace
         wsm = self._wsm
-        if not ws.is_isolated or not ws.branch_name or not isinstance(
-            wsm, GitWorktreeWorkspaceManager
+        if (
+            not ws.is_isolated
+            or not ws.branch_name
+            or not isinstance(wsm, GitWorktreeWorkspaceManager)
+            or not isinstance(candidate, WorkspaceContext)
         ):
-            # 非隔离 / 无分支 / 无 git 管理器:改动已在共享 base,集成是 no-op。
+            # 非隔离 / 无分支 / 无 git / 无 candidate：改动已在共享 base,集成是 no-op。
             return IntegrationOutcome("integrated", branch=ws.branch_name)
 
         committed = await wsm.commit(ws)
         if not committed:
-            return IntegrationOutcome("integrated", branch=ws.branch_name)  # 无改动,无需合并
+            return IntegrationOutcome("integrated", branch=ws.branch_name)  # 无改动
 
-        # Phase 2：集成 HEAD 是否在本 Worker 启动后动过?动过则查过期。
+        # Phase 2：candidate HEAD 是否在本 Worker 启动后动过?动过则查过期。
         if ws.base_revision:
-            head = await wsm.head()
+            head = await wsm.head(candidate.root)
             if head != ws.base_revision:
                 intervening = await wsm.changed_files(ws.base_revision, head)
                 if intervening:
                     write_set = await wsm.branch_files(ws.base_revision, ws.branch_name)
                     read_set, reads_unknown = _read_info(worker)
-                    overlap = intervening & (write_set | read_set)
-                    if overlap or reads_unknown:
+                    if (intervening & (write_set | read_set)) or reads_unknown:
                         self._metrics.incr("integration.stale")
                         return IntegrationOutcome("stale", branch=ws.branch_name)
 
         try:
-            await wsm.merge(ws)  # 冲突时内部已 merge --abort,base 保持干净
+            await wsm.merge_into(candidate, ws)  # 冲突于 candidate merge --abort,不碰真实 base
             self._metrics.incr("integration.merged")
             return IntegrationOutcome("integrated", branch=ws.branch_name)
         except GitWorktreeError as exc:
-            # 走到这里说明 overlap 检测没拦住却仍冲突(写写)：判 stale,交调度器在最新 HEAD 重跑。
             self._metrics.incr("integration.conflicts")
             return IntegrationOutcome("stale", branch=ws.branch_name, conflict=str(exc))
 

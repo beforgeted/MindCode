@@ -23,7 +23,7 @@ class WorkspaceManager(Protocol):
     @property
     def isolated(self) -> bool: ...
 
-    async def create(self, run_id: str) -> WorkspaceContext: ...
+    async def create(self, run_id: str, *, base_ref: str | None = None) -> WorkspaceContext: ...
 
     async def cleanup(self, workspace: WorkspaceContext, *, keep: bool = False) -> None: ...
 
@@ -38,7 +38,7 @@ class LocalWorkspaceManager:
     def isolated(self) -> bool:
         return False
 
-    async def create(self, run_id: str) -> WorkspaceContext:
+    async def create(self, run_id: str, *, base_ref: str | None = None) -> WorkspaceContext:
         return WorkspaceContext.local(self._root)
 
     async def cleanup(self, workspace: WorkspaceContext, *, keep: bool = False) -> None:

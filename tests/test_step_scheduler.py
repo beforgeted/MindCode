@@ -30,7 +30,7 @@ class FakeRuntime:
         self.completion_order: list[str] = []
 
     async def run(
-        self, definition, step, *, session_id, cancellation=None, trace_id=None
+        self, definition, step, *, session_id, cancellation=None, trace_id=None, base_ref=None
     ) -> WorkerRun:
         self.active += 1
         self.peak = max(self.peak, self.active)
@@ -99,7 +99,9 @@ async def test_dependent_dispatched_only_after_predecessor_integrated():
     events: list[tuple[str, str]] = []
 
     class OrderRuntime:
-        async def run(self, definition, step, *, session_id, cancellation=None, trace_id=None):
+        async def run(
+            self, definition, step, *, session_id, cancellation=None, trace_id=None, base_ref=None
+        ):
             events.append(("run", step.id))
             run = AgentRun.create(
                 definition, session_id=session_id, workspace=WorkspaceContext.local(Path("."))
@@ -113,7 +115,9 @@ async def test_dependent_dispatched_only_after_predecessor_integrated():
             )
 
     class OrderCoordinator:
-        async def integrate(self, worker: WorkerRun) -> IntegrationOutcome:
+        async def integrate(
+            self, worker: WorkerRun, candidate: object | None = None
+        ) -> IntegrationOutcome:
             events.append(("integrate", worker.step_id))
             return IntegrationOutcome(status="integrated", branch=None)
 
@@ -174,7 +178,9 @@ async def test_cancellation_token_is_forwarded_to_workers():
     seen: list = []
 
     class RecordingRuntime:
-        async def run(self, definition, step, *, session_id, cancellation=None, trace_id=None):
+        async def run(
+            self, definition, step, *, session_id, cancellation=None, trace_id=None, base_ref=None
+        ):
             seen.append(cancellation)
             run = AgentRun.create(
                 definition, session_id=session_id, workspace=WorkspaceContext.local(Path("."))

@@ -25,7 +25,7 @@ class FakeRuntime:
         self.trace_ids: list = []
 
     async def run(
-        self, definition, step, *, session_id, cancellation=None, trace_id=None
+        self, definition, step, *, session_id, cancellation=None, trace_id=None, base_ref=None
     ) -> WorkerRun:
         self.trace_ids.append(trace_id)
         run = AgentRun.create(
@@ -90,7 +90,7 @@ async def test_master_replans_on_rejection(tmp_path: Path):
         def __init__(self):
             self.calls = 0
 
-        async def verify(self, task, g, results) -> GlobalVerdict:
+        async def verify(self, task, g, results, target=None) -> GlobalVerdict:
             self.calls += 1
             if self.calls == 1:
                 return GlobalVerdict(accept=False, replan_instruction="重来")

@@ -29,6 +29,8 @@ class AppConfig:
     max_tool_concurrency: int = 8
     profile: ContextProfile = field(default_factory=ContextProfile)
     use_stub_llm: bool = False
+    # 集成产物的确定性验收命令（在 validation worktree 跑,exit 0 = 通过）;None=不跑,靠 LLM 读产物。
+    verify_command: str | None = None
 
     @property
     def state_root(self) -> Path:
@@ -62,6 +64,7 @@ class AppConfig:
             max_tool_concurrency=_env_int("CODEAGENT_TOOL_CONCURRENCY", 8),
             profile=profile,
             use_stub_llm=not os.environ.get("ANTHROPIC_API_KEY"),
+            verify_command=os.environ.get("CODEAGENT_VERIFY_CMD") or None,
         )
 
 
