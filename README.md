@@ -3,7 +3,8 @@
 Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落地方案与分期见
 [`MindCode_实现设计_V1.md`](MindCode_实现设计_V1.md)。
 
-当前落地范围：**P0–P6**（单 Agent + Multi-Agent 执行骨架 + 编排持久化/恢复与共享 Memory）。
+当前落地范围：**P0–P8**（单 Agent + Multi-Agent 事务化编排 + 编排持久化/恢复与共享 Memory
++ 工具执行安全 + Attempt 级幂等崩溃恢复）。
 
 ## 快速开始
 
@@ -85,9 +86,16 @@ pyright             # 类型
 | P5+ Integrator 兜底（带冲突现场的增强指令重跑） | `orchestration/integrator.py` |
 | P5+ Master Attempt Transaction（candidate 隔离 + 产物级验收 + CAS 原子 promote + fail-closed） | `orchestration/master_runtime.py`、`orchestration/global_verifier.py`、`workspace/git_worktree.py` |
 | P6 资源锁清理（引用计数驱逐） | `tool/resource_lock.py` |
-| P6 Run 持久化/恢复（事务式，未 promote 即整体重开，`/task --resume`） | `orchestration/run_store.py`、`orchestration/master_runtime.py` |
+| P6 Run 持久化/恢复（`/task --resume`；P8 起 Attempt 级幂等恢复） | `orchestration/run_store.py`、`orchestration/master_runtime.py` |
 | P6 共享 Memory（Worker 产候选，Supervisor 集中 staging） | `orchestration/shared_memory.py`、`memory/sqlite_store.py` |
 | P6 专项 Agent MemoryProfile（读写边界） | `agent/models.py`、`context/manager.py`、`memory/retriever.py` |
+| P7 工具副作用双轴（EffectKind × RetryPolicy，独立于并发轴） | `tool/effects.py`、`tool/base.py` |
+| P7 CommandPolicy 命令分类（危险拒 / 外部标记 / 本地）+ 可配 allow/deny | `tool/command_policy.py`、`config.py` |
+| P7 CommandExecutor 加固（进程树终止 + env 白名单过滤） | `tool/executor.py` |
+| P7 推测期禁外部副作用 + ApprovalPolicy（fail-safe 拒）+ DeferredAction 延后上报 | `tool/approval.py`、`tool/deferred.py`、`tool/builtin/run_command.py` |
+| P8 Attempt 级幂等崩溃恢复（状态机 + PROMOTING 按真实 HEAD 判定不重推） | `orchestration/run_store.py`、`orchestration/master_runtime.py` |
+| P8 孤儿 worktree/branch 回收 + BASE_STALE/replan 预算分离 | `workspace/git_worktree.py`、`orchestration/master_runtime.py`、`context/profile.py` |
+| 测试金字塔②③：真实-LLM 场景套件 + Planner 规划质量探针（opt-in） | `scenarios/`（普通 pytest 不跑真实 LLM） |
 
 ## 未实现（按分期）
 
