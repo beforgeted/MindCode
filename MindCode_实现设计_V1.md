@@ -277,8 +277,10 @@ Planner/Verifier 可注入（真实模型走 LLM 实现、stub 走确定性实�
   前 `+1`、释放后 `-1`，计数归零且锁空闲即删除，长跑进程不再泄漏。
 - **Run 持久化/恢复**：`orchestration/run_store.py`（`SqliteRunStore`/`NullRunStore`）持久化
   **planned graph 的 JSON** 与每个 `step_outcome`。`MasterRuntime.run(..., resume_master_run_id=...)`
-  重建图后重跑。**注**：事务化重构后（P5+），resume 语义改为"未 promote 的 run 一律从干净 Attempt
-  重开整张图"——副作用步骤不可信重放，不再做"跳过已完成 Step"的部分恢复。CLI：`/task --resume`。
+  重建图后重跑。**注**：事务化重构后（P5+）resume 从干净 Attempt 重开；**P8 起**升级为 Attempt 级
+  幂等恢复——持久化 Attempt 状态机，`PROMOTING` 在 `git.promote` 前落库带 `candidate_sha`，恢复时按
+  真实 base HEAD 判定"已成功不重推 / 安全重试 / BASE_STALE"，其余状态回收孤儿后从持久 `original_base`
+  重开；BASE_STALE 与语义 replan 走独立预算（`promote_max_retries`）。CLI：`/task --resume`。
 - **共享 Memory**：`orchestration/shared_memory.py` 的 `SupervisorMemoryWriter` 在 merge 后
   汇总各 Worker 的 `AgentRunResult.memory_candidates`，按 `candidate_key` 去重、按产出
   Agent 的 `MemoryProfile.writable_types` 过滤越界候选，集中 staging 到候选表
@@ -512,7 +514,7 @@ allowance 内，`ImagePayloadPruner` 跳过 `data is None` 的图片。
 ## 9. 当前状态
 
 ```
-127 passed
+173 passed
 ruff check: All checks passed
 pyright: 0 errors
 ```

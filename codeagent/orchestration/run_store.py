@@ -3,11 +3,12 @@
 持久化：planned graph 的 JSON + 每个 Step 的 `step_outcome`（崩溃安全的增量 checkpoint，
 upsert 幂等）。恢复时重建 TaskGraph、**不重新 plan**，避免图漂移。
 
-**恢复语义（P5+ Master Attempt Transaction 之后）**：不再做「跳过已完成 Step」的部分恢复——
-因为集成有非幂等副作用，在已改状态上续跑会重复叠加。改为：**未成功 promote 的 run 一律从
-干净 Attempt（original_base）整体重开**，只有已 promote（SUCCESS）的 run 才算完成、不再重跑。
-step_outcome 现主要作审计/可观测，不用于"跳过已完成"。（完整的 Attempt 级崩溃断点恢复见
-V1 §Phase 8 规划，尚未落地。）
+**恢复语义（P8 Attempt 级幂等恢复）**：持久化 Attempt 状态机（CREATED→…→PROMOTING→PROMOTED
+/DISCARDED），`PROMOTING` 在调用 `git.promote` **之前**落库并带 `candidate_sha`。resume 时：
+run 已 success 或末尾 attempt 已 PROMOTED → 幂等返回；末尾 attempt 处于 `PROMOTING`（崩溃危险窗口）
+→ 比对真实 base HEAD 与 candidate_sha/original_base_sha 决定"已成功不重推 / 安全重试 / BASE_STALE"；
+其它状态 → 回收孤儿 worktree/branch 后，从**持久化的** `original_base_sha`（非当前 HEAD）开新 Attempt
+重跑整张图。BASE_STALE 与语义 replan 走**独立预算**。step_outcome 仍作审计/可观测。
 
 设计：SQLite + WAL + `asyncio.to_thread`，风格对齐 memory/sqlite_store.py；默认 NullRunStore
 （no-op）：单测 / 不需要持久化时零成本。

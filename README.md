@@ -24,7 +24,8 @@ REPL 命令：`/context` `/compact` `/memory add|list|search|show|delete|harvest
 （各自 git worktree 隔离，集成进 candidate 而非真实 base）→ 依赖门控/过期重跑/Integrator 兜底
 自愈冲突 → **产物级全局验收** → 通过才 **CAS 原子推进真实 base**，否则整个 Attempt 丢弃、从
 起点重开（用户只看到"任务完成/未完成"，不接触 git 冲突）。非 git 环境回退只读并行+写串行。
-`/task --resume <mrun_id>` 恢复：未 promote 的 run 从干净 Attempt 整体重开（副作用不可信重放）。
+`/task --resume <mrun_id>` 恢复：Attempt 级幂等恢复——已 promote 的识别为完成不重推，
+PROMOTING 崩溃窗口按真实 base HEAD 判定，其余状态回收孤儿后从持久 original_base 重开（P8）。
 可选 `CODEAGENT_VERIFY_CMD` 指定确定性验收命令，在独立 validation worktree 运行。
 
 Memory 示例：
@@ -90,9 +91,9 @@ pyright             # 类型
 
 ## 未实现（按分期）
 
-- **验证缺口**：真实模型 Planner/Verifier 大规模 benchmark；跨进程 verify/promote 中途崩溃的
-  精细断点恢复（当前为"未 promote 即整体重开"）；Worker 候选自动抽取器
-  （`AgentRuntime.candidate_harvester`）的默认接线。
+- **验证缺口**：真实模型 Planner/Verifier 大规模 benchmark；Worker 候选自动抽取器
+  （`AgentRuntime.candidate_harvester`）的默认接线。（**P8 起**已有 Attempt 级幂等崩溃恢复：
+  PROMOTING 窗口按真实 base HEAD 判定不重复推进、孤儿 worktree/branch 回收、BASE_STALE 独立预算。）
 - **外部副作用隔离**：Master Attempt 的 candidate 只隔离仓库内文件；Worker 的外部副作用
   （API/DB/树外写/发布/`run_command` 写绝对路径）不被事务覆盖，需后续用幂等键 / 两阶段提交 /
   延后执行 / 不可重试标注治理（属 `run_command` sandbox 缺口）。
