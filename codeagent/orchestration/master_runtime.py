@@ -22,7 +22,13 @@ from codeagent.infra.ids import new_id
 from codeagent.infra.metrics import Metrics
 from codeagent.orchestration.global_verifier import GlobalVerifier, VerificationTarget
 from codeagent.orchestration.planner import Planner
-from codeagent.orchestration.run_store import NullRunStore, RunStore, StepOutcome
+from codeagent.orchestration.run_store import (
+    AttemptRecord,
+    AttemptState,
+    NullRunStore,
+    RunStore,
+    StepOutcome,
+)
 from codeagent.orchestration.shared_memory import NullSupervisorMemoryWriter, SupervisorWriter
 from codeagent.orchestration.step_scheduler import SchedulerResult, StepScheduler
 from codeagent.runtime.agent_runtime import WorkerRun
@@ -98,7 +104,7 @@ class MasterRuntime:
         original_base = await git.base_revision() if git else None
         await self._run_store.save_run(
             master_run_id=master_run_id, session_id=session_id, task=task,
-            graph=graph, status="running",
+            graph=graph, status="running", original_base_sha=original_base,
         )
 
         async def _checkpoint(step_id: str, worker: WorkerRun, integrated: bool) -> None:
@@ -111,6 +117,7 @@ class MasterRuntime:
         result: SchedulerResult | None = None
         verdict = None
         integrated_ok = False
+        promoted_sha: str | None = None
         reason = ""
 
         while attempts < max_attempts:
@@ -120,23 +127,43 @@ class MasterRuntime:
                 if git and original_base is not None
                 else None
             )
+            if candidate is not None:
+                await self._save_attempt(
+                    master_run_id, attempts, AttemptState.RUNNING,
+                    original_base=original_base, candidate_branch=candidate.branch_name,
+                )
             result = await self._scheduler.run(
                 graph, session_id=session_id, cancellation=cancellation,
                 trace_id=master_run_id, on_step_complete=_checkpoint, candidate=candidate,
             )
             candidate_sha = await git.head(candidate.root) if (git and candidate) else None
+            if candidate is not None:
+                await self._update_attempt(
+                    master_run_id, attempts, AttemptState.CANDIDATE_FROZEN,
+                    candidate_sha=candidate_sha,
+                )
             target = await self._build_target(git, original_base, candidate_sha)
+            if candidate is not None:
+                await self._update_attempt(master_run_id, attempts, AttemptState.VERIFYING)
             verdict = await self._verifier.verify(current_task, graph, result, target)
 
             steps_ok = not result.failed and not result.blocked
             accept = verdict.accept and not verdict.indeterminate and steps_ok
 
             if accept and git and candidate_sha and original_base is not None:
+                # PROMOTING 必须在 git.promote 之前落库（带 candidate_sha）→ 崩溃恢复可幂等判定。
+                await self._update_attempt(
+                    master_run_id, attempts, AttemptState.PROMOTING, candidate_sha=candidate_sha
+                )
                 promoted = await git.promote(candidate_sha, expected_base=original_base)
                 await self._discard_attempt(candidate, result)
                 if promoted:
-                    integrated_ok, reason = True, verdict.reason
+                    await self._update_attempt(master_run_id, attempts, AttemptState.PROMOTED)
+                    integrated_ok, promoted_sha, reason = True, candidate_sha, verdict.reason
                     break
+                await self._update_attempt(
+                    master_run_id, attempts, AttemptState.DISCARDED, verdict="base_stale"
+                )
                 reason = "真实 base 被外部推进(BASE_STALE)，已放弃本次推进"
                 original_base = await git.base_revision()  # 刷新后重试
                 continue
@@ -148,6 +175,10 @@ class MasterRuntime:
             reason = verdict.reason or (
                 "验证器不可用" if verdict.indeterminate else "存在未完成 Step"
             )
+            if candidate is not None:
+                await self._update_attempt(
+                    master_run_id, attempts, AttemptState.DISCARDED, verdict=reason[:200] or "reject"
+                )
             await self._discard_attempt(candidate, result)
             if attempts >= max_attempts:
                 break
@@ -167,7 +198,7 @@ class MasterRuntime:
             deferred.extend(worker.run.deferred_actions)
 
         await self._run_store.update_run_status(
-            master_run_id, "success" if integrated_ok else "failed"
+            master_run_id, "success" if integrated_ok else "failed", promoted_sha=promoted_sha
         )
         return FinalResult(
             task=task,
@@ -212,6 +243,43 @@ class MasterRuntime:
             deterministic_ok=det_ok,
             deterministic_detail=det_detail,
         )
+
+    async def _save_attempt(
+        self,
+        master_run_id: str,
+        attempt_no: int,
+        state: str,
+        *,
+        original_base: str | None,
+        candidate_branch: str | None,
+    ) -> None:
+        try:
+            await self._run_store.save_attempt(
+                master_run_id,
+                AttemptRecord(
+                    attempt_no=attempt_no, state=state,
+                    original_base_sha=original_base, candidate_branch=candidate_branch,
+                ),
+            )
+        except Exception:
+            self._metrics.incr("master.checkpoint_failures")
+
+    async def _update_attempt(
+        self,
+        master_run_id: str,
+        attempt_no: int,
+        state: str,
+        *,
+        candidate_sha: str | None = None,
+        verdict: str | None = None,
+    ) -> None:
+        try:
+            await self._run_store.update_attempt(
+                master_run_id, attempt_no, state=state,
+                candidate_sha=candidate_sha, verdict=verdict,
+            )
+        except Exception:
+            self._metrics.incr("master.checkpoint_failures")
 
     async def _discard_attempt(
         self, candidate: WorkspaceContext | None, result: SchedulerResult

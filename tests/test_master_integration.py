@@ -56,6 +56,40 @@ def _config(repo: Path) -> AppConfig:
 
 
 @pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
+async def test_attempt_state_sequence_persisted_on_success(tmp_path: Path):
+    """P8b：成功一次跑完后，attempt 记录应到达 PROMOTED，run 记 promoted_sha。"""
+    from codeagent.orchestration.run_store import AttemptState, SqliteRunStore
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    config = _config(repo)
+    store = SqliteRunStore(repo / ".home" / "runs.db")
+    await store.start()
+    client = StubLlmClient([[("write_file", {"path": "a.txt", "content": "AAA"})], "done A"])
+    graph = TaskGraph([Step("a", "default", "写 a.txt")])
+
+    async with AgentSession(config, llm_client=client) as session:
+        master = await build_master(
+            config=config, llm_client=client, engine=session.engine,
+            event_store=session.event_store, metrics=session.metrics,
+            definition=session.definition, planner=StaticPlanner(graph), run_store=store,
+        )
+        final = await master.run("写 a", session_id=session.session_id)
+
+    assert final.integrated
+    record = await store.load_run(final.master_run_id)
+    assert record is not None
+    assert record.status == "success"
+    assert record.original_base_sha is not None
+    assert record.promoted_sha is not None
+    last = record.last_attempt
+    assert last is not None
+    assert last.state == AttemptState.PROMOTED
+    assert last.candidate_sha == record.promoted_sha
+
+
+@pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
 async def test_two_workers_write_in_worktrees_and_merge_back(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
