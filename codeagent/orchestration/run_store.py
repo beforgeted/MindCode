@@ -21,6 +21,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, TypeVar, runtime_checkable
 
@@ -29,6 +30,35 @@ from codeagent.evidence.models import EvidenceRef, EvidenceType
 from codeagent.orchestration.task_graph import Step, TaskGraph
 
 _T = TypeVar("_T")
+
+
+class AttemptState(StrEnum):
+    """一次 Attempt 的生命周期状态（P8 崩溃恢复）。转移在动作**发生前**持久化。"""
+
+    CREATED = "created"  # candidate 已建
+    RUNNING = "running"  # 正在调度 Worker
+    CANDIDATE_FROZEN = "candidate_frozen"  # 冻结 candidate_sha，待验收
+    VERIFYING = "verifying"  # 产物级验收进行中
+    VERIFIED = "verified"  # 验收通过，待 promote
+    PROMOTING = "promoting"  # 即将/正在 CAS 推进真实 base（危险窗口，必带 candidate_sha）
+    PROMOTED = "promoted"  # 已原子推进真实 base（终态：成功）
+    DISCARDED = "discarded"  # reject/indeterminate/BASE_STALE → 丢弃
+    FAILED = "failed"  # 异常
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptRecord:
+    attempt_no: int
+    state: str = AttemptState.CREATED
+    original_base_sha: str | None = None
+    candidate_branch: str | None = None
+    candidate_sha: str | None = None
+    verdict: str = ""
+
+    @property
+    def promoted(self) -> bool:
+        return self.state == AttemptState.PROMOTED
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,36 +89,88 @@ class RunRecord:
     status: str
     graph: TaskGraph
     outcomes: dict[str, StepOutcome] = field(default_factory=dict)
+    original_base_sha: str | None = None
+    promoted_sha: str | None = None
+    attempts: tuple[AttemptRecord, ...] = ()
+
+    @property
+    def last_attempt(self) -> AttemptRecord | None:
+        return max(self.attempts, key=lambda a: a.attempt_no) if self.attempts else None
+
 
 
 @runtime_checkable
 class RunStore(Protocol):
     async def save_run(
-        self, *, master_run_id: str, session_id: str, task: str, graph: TaskGraph, status: str
+        self,
+        *,
+        master_run_id: str,
+        session_id: str,
+        task: str,
+        graph: TaskGraph,
+        status: str,
+        original_base_sha: str | None = None,
     ) -> None: ...
 
-    async def update_run_status(self, master_run_id: str, status: str) -> None: ...
+    async def update_run_status(
+        self, master_run_id: str, status: str, *, promoted_sha: str | None = None
+    ) -> None: ...
 
     async def record_step(self, master_run_id: str, outcome: StepOutcome) -> None: ...
 
     async def mark_merged(self, master_run_id: str, step_id: str, branch_name: str) -> None: ...
+
+    async def save_attempt(self, master_run_id: str, attempt: AttemptRecord) -> None: ...
+
+    async def update_attempt(
+        self,
+        master_run_id: str,
+        attempt_no: int,
+        *,
+        state: str,
+        candidate_sha: str | None = None,
+        verdict: str | None = None,
+    ) -> None: ...
 
     async def load_run(self, master_run_id: str) -> RunRecord | None: ...
 
 
 class NullRunStore:
     async def save_run(
-        self, *, master_run_id: str, session_id: str, task: str, graph: TaskGraph, status: str
+        self,
+        *,
+        master_run_id: str,
+        session_id: str,
+        task: str,
+        graph: TaskGraph,
+        status: str,
+        original_base_sha: str | None = None,
     ) -> None:
         return None
 
-    async def update_run_status(self, master_run_id: str, status: str) -> None:
+    async def update_run_status(
+        self, master_run_id: str, status: str, *, promoted_sha: str | None = None
+    ) -> None:
         return None
 
     async def record_step(self, master_run_id: str, outcome: StepOutcome) -> None:
         return None
 
     async def mark_merged(self, master_run_id: str, step_id: str, branch_name: str) -> None:
+        return None
+
+    async def save_attempt(self, master_run_id: str, attempt: AttemptRecord) -> None:
+        return None
+
+    async def update_attempt(
+        self,
+        master_run_id: str,
+        attempt_no: int,
+        *,
+        state: str,
+        candidate_sha: str | None = None,
+        verdict: str | None = None,
+    ) -> None:
         return None
 
     async def load_run(self, master_run_id: str) -> RunRecord | None:
@@ -184,6 +266,8 @@ CREATE TABLE IF NOT EXISTS master_run (
     task          TEXT NOT NULL,
     status        TEXT NOT NULL,
     graph_json    TEXT NOT NULL,
+    original_base_sha TEXT,
+    promoted_sha  TEXT,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -199,7 +283,24 @@ CREATE TABLE IF NOT EXISTS step_outcome (
     updated_at    TEXT NOT NULL,
     PRIMARY KEY (master_run_id, step_id)
 );
+CREATE TABLE IF NOT EXISTS attempt (
+    master_run_id     TEXT NOT NULL,
+    attempt_no        INTEGER NOT NULL,
+    original_base_sha TEXT,
+    candidate_branch  TEXT,
+    candidate_sha     TEXT,
+    state             TEXT NOT NULL,
+    verdict           TEXT NOT NULL DEFAULT '',
+    updated_at        TEXT NOT NULL,
+    PRIMARY KEY (master_run_id, attempt_no)
+);
 """
+
+# 旧库兼容：master_run 早期没有这两列，缺则补（ADD COLUMN 幂等靠捕获重复列错误）。
+_MIGRATIONS = (
+    "ALTER TABLE master_run ADD COLUMN original_base_sha TEXT",
+    "ALTER TABLE master_run ADD COLUMN promoted_sha TEXT",
+)
 
 
 class SqliteRunStore:
@@ -223,6 +324,11 @@ class SqliteRunStore:
         try:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(_SCHEMA_SQL)
+            for stmt in _MIGRATIONS:
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
             conn.commit()
         finally:
             conn.close()
@@ -257,7 +363,14 @@ class SqliteRunStore:
             conn.close()
 
     async def save_run(
-        self, *, master_run_id: str, session_id: str, task: str, graph: TaskGraph, status: str
+        self,
+        *,
+        master_run_id: str,
+        session_id: str,
+        task: str,
+        graph: TaskGraph,
+        status: str,
+        original_base_sha: str | None = None,
     ) -> None:
         now = datetime.now(UTC).isoformat()
         graph_json = graph_to_json(graph)
@@ -265,23 +378,76 @@ class SqliteRunStore:
         def op(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """INSERT INTO master_run(
-                    master_run_id, session_id, task, status, graph_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    master_run_id, session_id, task, status, graph_json,
+                    original_base_sha, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(master_run_id) DO UPDATE SET
                     task=excluded.task, status=excluded.status,
-                    graph_json=excluded.graph_json, updated_at=excluded.updated_at""",
-                (master_run_id, session_id, task, status, graph_json, now, now),
+                    graph_json=excluded.graph_json,
+                    original_base_sha=COALESCE(excluded.original_base_sha,
+                                               master_run.original_base_sha),
+                    updated_at=excluded.updated_at""",
+                (master_run_id, session_id, task, status, graph_json, original_base_sha, now, now),
             )
 
         await self._run(op)
 
-    async def update_run_status(self, master_run_id: str, status: str) -> None:
+    async def update_run_status(
+        self, master_run_id: str, status: str, *, promoted_sha: str | None = None
+    ) -> None:
         now = datetime.now(UTC).isoformat()
 
         def op(conn: sqlite3.Connection) -> None:
             conn.execute(
-                "UPDATE master_run SET status=?, updated_at=? WHERE master_run_id=?",
-                (status, now, master_run_id),
+                """UPDATE master_run SET status=?, updated_at=?,
+                   promoted_sha=COALESCE(?, promoted_sha) WHERE master_run_id=?""",
+                (status, now, promoted_sha, master_run_id),
+            )
+
+        await self._run(op)
+
+    async def save_attempt(self, master_run_id: str, attempt: AttemptRecord) -> None:
+        now = datetime.now(UTC).isoformat()
+
+        def op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """INSERT INTO attempt(
+                    master_run_id, attempt_no, original_base_sha, candidate_branch,
+                    candidate_sha, state, verdict, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(master_run_id, attempt_no) DO UPDATE SET
+                    original_base_sha=excluded.original_base_sha,
+                    candidate_branch=excluded.candidate_branch,
+                    candidate_sha=excluded.candidate_sha,
+                    state=excluded.state, verdict=excluded.verdict,
+                    updated_at=excluded.updated_at""",
+                (
+                    master_run_id, attempt.attempt_no, attempt.original_base_sha,
+                    attempt.candidate_branch, attempt.candidate_sha,
+                    attempt.state, attempt.verdict, now,
+                ),
+            )
+
+        await self._run(op)
+
+    async def update_attempt(
+        self,
+        master_run_id: str,
+        attempt_no: int,
+        *,
+        state: str,
+        candidate_sha: str | None = None,
+        verdict: str | None = None,
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+
+        def op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """UPDATE attempt SET state=?, updated_at=?,
+                   candidate_sha=COALESCE(?, candidate_sha),
+                   verdict=COALESCE(?, verdict)
+                   WHERE master_run_id=? AND attempt_no=?""",
+                (state, now, candidate_sha, verdict, master_run_id, attempt_no),
             )
 
         await self._run(op)
@@ -347,6 +513,21 @@ class SqliteRunStore:
                     branch_name=r["branch_name"],
                     merged=bool(r["merged"]),
                 )
+            attempts: list[AttemptRecord] = []
+            for a in conn.execute(
+                "SELECT * FROM attempt WHERE master_run_id=? ORDER BY attempt_no", (master_run_id,)
+            ):
+                attempts.append(
+                    AttemptRecord(
+                        attempt_no=a["attempt_no"],
+                        state=a["state"],
+                        original_base_sha=a["original_base_sha"],
+                        candidate_branch=a["candidate_branch"],
+                        candidate_sha=a["candidate_sha"],
+                        verdict=a["verdict"] or "",
+                    )
+                )
+            keys = row.keys()
             return RunRecord(
                 master_run_id=row["master_run_id"],
                 session_id=row["session_id"],
@@ -354,12 +535,17 @@ class SqliteRunStore:
                 status=row["status"],
                 graph=graph_from_json(row["graph_json"]),
                 outcomes=outcomes,
+                original_base_sha=row["original_base_sha"] if "original_base_sha" in keys else None,
+                promoted_sha=row["promoted_sha"] if "promoted_sha" in keys else None,
+                attempts=tuple(attempts),
             )
 
         return await self._run(op)
 
 
 __all__ = [
+    "AttemptRecord",
+    "AttemptState",
     "NullRunStore",
     "RunRecord",
     "RunStore",

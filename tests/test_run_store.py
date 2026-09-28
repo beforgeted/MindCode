@@ -114,6 +114,47 @@ async def test_null_run_store_is_noop():
     assert await store.load_run("x") is None
 
 
+async def test_attempt_crud_and_load(tmp_path: Path):
+    from codeagent.orchestration.run_store import AttemptRecord, AttemptState
+
+    store = SqliteRunStore(tmp_path / "runs.db")
+    await store.start()
+    await store.save_run(
+        master_run_id="m1", session_id="s", task="t", graph=_graph(),
+        status="running", original_base_sha="base000",
+    )
+    await store.save_attempt(
+        "m1",
+        AttemptRecord(
+            attempt_no=1, state=AttemptState.CREATED,
+            original_base_sha="base000", candidate_branch="codeagent/cand/att1",
+        ),
+    )
+    await store.update_attempt("m1", 1, state=AttemptState.PROMOTING, candidate_sha="cand999")
+    record = await store.load_run("m1")
+    assert record is not None
+    assert record.original_base_sha == "base000"
+    last = record.last_attempt
+    assert last is not None
+    assert last.attempt_no == 1
+    assert last.state == AttemptState.PROMOTING
+    assert last.candidate_sha == "cand999"
+    assert last.candidate_branch == "codeagent/cand/att1"
+
+
+async def test_promoted_sha_and_status(tmp_path: Path):
+    store = SqliteRunStore(tmp_path / "runs.db")
+    await store.start()
+    await store.save_run(
+        master_run_id="m2", session_id="s", task="t", graph=_graph(), status="running"
+    )
+    await store.update_run_status("m2", "success", promoted_sha="promoted123")
+    record = await store.load_run("m2")
+    assert record is not None
+    assert record.status == "success"
+    assert record.promoted_sha == "promoted123"
+
+
 async def test_resume_reruns_whole_attempt(tmp_path: Path):
     """事务语义下的 resume：未 promote 的 run 一律从干净 Attempt 重开,不做部分跳过。
 
