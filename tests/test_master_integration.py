@@ -56,6 +56,59 @@ def _config(repo: Path) -> AppConfig:
 
 
 @pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
+async def test_base_stale_and_replan_budgets_are_separate(tmp_path: Path):
+    """P8e：BASE_STALE 消耗 promote 重试预算，reject 消耗 replan 预算，互不侵占。"""
+    from codeagent.context.profile import ContextProfile
+    from codeagent.orchestration.global_verifier import GlobalVerdict
+
+    async def _run_case(*, reject: bool, promote_fails: bool) -> dict:
+        repo = tmp_path / ("rej" if reject else "stale")
+        repo.mkdir()
+        _init_repo(repo)
+        base_cfg = _config(repo)
+        profile = replace(
+            base_cfg.profile, master_max_replans=1, promote_max_retries=1, agent_max_concurrency=1
+        )
+        config = replace(base_cfg, profile=profile)
+        client = StubLlmClient(
+            [[("write_file", {"path": "a.txt", "content": "AAA"})], "done"] * 6
+        )
+        graph = TaskGraph([Step("a", "default", "写 a.txt")])
+
+        class _RejectVerifier:
+            async def verify(self, task, graph, results, target=None) -> GlobalVerdict:
+                return GlobalVerdict(accept=False, reason="不接受", replan_instruction="重来")
+
+        async with AgentSession(config, llm_client=client) as session:
+            master = await build_master(
+                config=config, llm_client=client, engine=session.engine,
+                event_store=session.event_store, metrics=session.metrics,
+                definition=session.definition, planner=StaticPlanner(graph),
+                global_verifier=_RejectVerifier() if reject else None,
+            )
+            if promote_fails:
+                async def _never(candidate_sha, *, expected_base):
+                    return False
+                master._wsm.promote = _never  # type: ignore[attr-defined]
+            final = await master.run("写 a", session_id=session.session_id)
+            counters = session.metrics.snapshot()["counters"]
+        return {"final": final, "counters": counters}
+
+    # reject 路径：吃 replan 预算，不动 promote 预算
+    rej = await _run_case(reject=True, promote_fails=False)
+    assert not rej["final"].integrated
+    assert rej["counters"].get("master.replans", 0) == 1
+    assert rej["counters"].get("master.promote_retries", 0) == 0
+
+    # BASE_STALE 路径：吃 promote 预算，不动 replan 预算
+    stale = await _run_case(reject=False, promote_fails=True)
+    assert not stale["final"].integrated
+    assert stale["counters"].get("master.promote_retries", 0) == 1
+    assert stale["counters"].get("master.replans", 0) == 0
+    assert "promote 重试预算" in stale["final"].reason
+
+
+@pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
 async def test_reclaim_orphans_removes_leftover_worktrees_and_branches(tmp_path: Path):
     """P8d：崩溃遗留的 candidate/worker worktree 与分支应被回收，只剩主工作树。"""
     from codeagent.workspace.git_worktree import GitWorktreeWorkspaceManager

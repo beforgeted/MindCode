@@ -56,6 +56,8 @@ class ContextProfile:
     # Multi-Agent 编排（P5/P6）
     agent_max_concurrency: int = 2
     master_max_replans: int = 1
+    # BASE_STALE（真实 base 被外部推进）专用重试预算，独立于语义 replan（P8）
+    promote_max_retries: int = 2
     # 集成期检测到"推测执行过期"时,在最新基线上重跑的次数上限（P6 Phase 2）
     agent_max_reruns: int = 2
     # 重跑预算耗尽仍不收敛时,Integrator 兜底次数上限（P6 Phase 3）

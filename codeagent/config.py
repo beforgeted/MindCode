@@ -64,7 +64,13 @@ class AppConfig:
         )
         project_root = home / "projects" / identity.project_id if configured_home else home
         window = _env_int("CODEAGENT_CONTEXT_WINDOW", 200_000)
-        profile = replace(ContextProfile(), context_window=window)
+        profile = replace(
+            ContextProfile(),
+            context_window=window,
+            promote_max_retries=_env_int(
+                "CODEAGENT_PROMOTE_MAX_RETRIES", ContextProfile().promote_max_retries
+            ),
+        )
         return cls(
             workspace_root=workspace,
             home=home,

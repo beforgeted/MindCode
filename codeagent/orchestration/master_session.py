@@ -103,6 +103,7 @@ async def build_master(
         global_verifier=gverif,
         workspace_manager=wsm,
         max_replans=config.profile.master_max_replans,
+        promote_max_retries=config.profile.promote_max_retries,
         verify_command=config.verify_command,
         memory_writer=memory_writer,
         run_store=run_store,

@@ -67,6 +67,7 @@ class MasterRuntime:
         global_verifier: GlobalVerifier,
         workspace_manager: WorkspaceManager,
         max_replans: int = 1,
+        promote_max_retries: int = 2,
         verify_command: str | None = None,
         memory_writer: SupervisorWriter | None = None,
         run_store: RunStore | None = None,
@@ -77,6 +78,7 @@ class MasterRuntime:
         self._verifier = global_verifier
         self._wsm = workspace_manager
         self._max_replans = max(0, max_replans)
+        self._promote_max_retries = max(0, promote_max_retries)
         self._verify_command = verify_command
         self._memory_writer = memory_writer or NullSupervisorMemoryWriter()
         self._run_store = run_store or NullRunStore()
@@ -121,15 +123,16 @@ class MasterRuntime:
                 master_run_id, _to_outcome(step_id, worker, integrated)
             )
 
-        max_attempts = self._max_replans + 1
         current_task, attempts = task, 0
+        replans_left = self._max_replans
+        promote_retries_left = self._promote_max_retries
         result: SchedulerResult | None = None
         verdict = None
         integrated_ok = False
         promoted_sha: str | None = None
         reason = ""
 
-        while attempts < max_attempts:
+        while True:
             attempts += 1
             attempt_no = attempt_offset + attempts  # 恢复时接着已有 attempt_no，避免 PK 冲突
             candidate = (
@@ -174,7 +177,13 @@ class MasterRuntime:
                 await self._update_attempt(
                     master_run_id, attempt_no, AttemptState.DISCARDED, verdict="base_stale"
                 )
-                reason = "真实 base 被外部推进(BASE_STALE)，已放弃本次推进"
+                # BASE_STALE 走**独立**的 promote 重试预算，不吃语义 replan 预算。
+                if promote_retries_left <= 0:
+                    reason = "真实 base 被外部反复推进(BASE_STALE)，超出 promote 重试预算"
+                    break
+                promote_retries_left -= 1
+                self._metrics.incr("master.promote_retries")
+                reason = "真实 base 被外部推进(BASE_STALE)，刷新后重试"
                 original_base = await git.base_revision()  # 刷新后重试
                 continue
             if accept and not git:
@@ -191,8 +200,9 @@ class MasterRuntime:
                     verdict=reason[:200] or "reject",
                 )
             await self._discard_attempt(candidate, result)
-            if attempts >= max_attempts:
+            if replans_left <= 0:
                 break
+            replans_left -= 1
             self._metrics.incr("master.replans")
             current_task = verdict.replan_instruction or task
             graph = await self._planner.plan(current_task)
