@@ -30,6 +30,8 @@ def _run_git(root: Path, *args: str) -> str:
         ["git", "-C", str(root), *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",  # git 输出 UTF-8；不指定则 Windows 按 cp936 解码，非 ASCII 路径会错
+        errors="replace",
         timeout=60,
     )
     if proc.returncode != 0:
@@ -169,6 +171,72 @@ class GitWorktreeWorkspaceManager:
                 _run_git(self._repo, "branch", "-D", branch)
             except GitWorktreeError:
                 pass
+
+    # ---- 孤儿回收（P8d：崩溃遗留的 worktree/branch）----
+
+    async def reclaim_orphans(self, keep_branches: set[str] | None = None) -> int:
+        """回收 self._dir 下不在 keep_branches 的 worktree，并删除悬空 codeagent/* 分支。
+
+        返回移除的 worktree 数。用于 resume 前清理上一次崩溃残留（此刻尚无新 candidate，
+        keep 通常为空）。所有 git 失败都吞掉，回收是尽力而为、不阻断主流程。
+        """
+        keep = keep_branches or set()
+        return await asyncio.to_thread(self._reclaim_orphans_sync, keep)
+
+    def _list_worktrees(self) -> list[tuple[Path, str | None]]:
+        out = _run_git(self._repo, "worktree", "list", "--porcelain")
+        entries: list[tuple[Path, str | None]] = []
+        path: Path | None = None
+        branch: str | None = None
+        for line in out.splitlines() + [""]:
+            if line.startswith("worktree "):
+                path = Path(line[len("worktree ") :]).resolve()
+                branch = None
+            elif line.startswith("branch "):
+                ref = line[len("branch ") :].strip()
+                branch = ref.removeprefix("refs/heads/")
+            elif line == "" and path is not None:
+                entries.append((path, branch))
+                path, branch = None, None
+        return entries
+
+    def _reclaim_orphans_sync(self, keep: set[str]) -> int:
+        import os
+
+        dir_key = os.path.normcase(str(self._dir))
+        repo_key = os.path.normcase(str(self._repo))
+        removed = 0
+        for path, branch in self._list_worktrees():
+            pkey = os.path.normcase(str(path))
+            if pkey == repo_key:
+                continue
+            if not pkey.startswith(dir_key):  # 只碰我们自己的 worktree 目录
+                continue
+            if branch and branch in keep:
+                continue
+            try:
+                _run_git(self._repo, "worktree", "remove", "--force", str(path))
+            except GitWorktreeError:
+                shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+        try:
+            _run_git(self._repo, "worktree", "prune")
+        except GitWorktreeError:
+            pass
+        try:
+            listing = _run_git(
+                self._repo, "branch", "--list", "codeagent/*", "--format", "%(refname:short)"
+            )
+        except GitWorktreeError:
+            listing = ""
+        for b in (ln.strip() for ln in listing.splitlines() if ln.strip()):
+            if b in keep:
+                continue
+            try:
+                _run_git(self._repo, "branch", "-D", b)
+            except GitWorktreeError:
+                pass
+        return removed
 
     # ---- commit / merge（进 candidate，不碰真实 base）----
 

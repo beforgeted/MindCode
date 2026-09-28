@@ -287,8 +287,15 @@ class MasterRuntime:
     async def _reclaim_orphans(
         self, record: "RunRecord", git: GitWorktreeWorkspaceManager | None
     ) -> None:
-        """回收崩溃遗留的孤儿 worktree/branch（8d 实现）。"""
-        return None
+        """回收崩溃遗留的孤儿 worktree/branch。resume 将开全新 attempt，旧分支全是孤儿。"""
+        if git is None:
+            return
+        try:
+            removed = await git.reclaim_orphans(keep_branches=set())
+            if removed:
+                self._metrics.incr("master.orphans_reclaimed", removed)
+        except Exception:
+            self._metrics.incr("master.cleanup_failures")
 
     async def _build_target(
         self,
