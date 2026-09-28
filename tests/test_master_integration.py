@@ -56,6 +56,57 @@ def _config(repo: Path) -> AppConfig:
 
 
 @pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
+async def test_recover_promote_succeeded_but_state_lost_is_idempotent(tmp_path: Path):
+    """P8c④：promote 已成功但状态未落库 → resume 识别为已完成，绝不重复推进 base。"""
+    from codeagent.orchestration.run_store import AttemptState, SqliteRunStore
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    config = _config(repo)
+    store = SqliteRunStore(repo / ".home" / "runs.db")
+    await store.start()
+
+    def _head() -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+
+    client = StubLlmClient([[("write_file", {"path": "a.txt", "content": "AAA"})], "done A"])
+    graph = TaskGraph([Step("a", "default", "写 a.txt")])
+
+    async with AgentSession(config, llm_client=client) as session:
+        master = await build_master(
+            config=config, llm_client=client, engine=session.engine,
+            event_store=session.event_store, metrics=session.metrics,
+            definition=session.definition, planner=StaticPlanner(graph), run_store=store,
+        )
+        final = await master.run("写 a", session_id=session.session_id)
+        assert final.integrated
+        mrun = final.master_run_id
+        head_after_promote = _head()
+        record = await store.load_run(mrun)
+        assert record is not None and record.promoted_sha == head_after_promote
+        last_no = record.last_attempt.attempt_no  # type: ignore[union-attr]
+
+        # 伪造"promote 成功但状态未落库"：把 attempt 退回 PROMOTING、run 退回 running。
+        await store.update_attempt(
+            mrun, last_no, state=AttemptState.PROMOTING, candidate_sha=head_after_promote
+        )
+        await store.update_run_status(mrun, "running")
+
+        final2 = await master.run("写 a", session_id=session.session_id, resume_master_run_id=mrun)
+
+    assert final2.integrated
+    assert "未重推" in final2.reason
+    assert _head() == head_after_promote  # base 未被二次推进
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "AAA"
+    assert _worktree_count(repo) == 1
+    record2 = await store.load_run(mrun)
+    assert record2 is not None and record2.status == "success"
+
+
+@pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
 async def test_attempt_state_sequence_persisted_on_success(tmp_path: Path):
     """P8b：成功一次跑完后，attempt 记录应到达 PROMOTED，run 记 promoted_sha。"""
     from codeagent.orchestration.run_store import AttemptState, SqliteRunStore

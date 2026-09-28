@@ -26,6 +26,7 @@ from codeagent.orchestration.run_store import (
     AttemptRecord,
     AttemptState,
     NullRunStore,
+    RunRecord,
     RunStore,
     StepOutcome,
 )
@@ -92,16 +93,24 @@ class MasterRuntime:
         self._metrics.incr("master.runs")
         git = self._wsm if isinstance(self._wsm, GitWorktreeWorkspaceManager) else None
 
+        attempt_offset = 0
         if resume_master_run_id is not None:
             record = await self._run_store.load_run(resume_master_run_id)
             if record is None:
                 raise ValueError(f"找不到可恢复的 master run: {resume_master_run_id}")
             self._metrics.incr("master.resumes")
+            recovered = await self._try_recover(record, git)
+            if recovered is not None:
+                return recovered  # 已完成 / promote 幂等恢复完成，无需重跑
             master_run_id, task, graph = record.master_run_id, record.task, record.graph
+            await self._reclaim_orphans(record, git)
+            # 关键：用**持久化的** original_base_sha，不用当前 HEAD（可能已被某次 promote 移动）。
+            original_base = record.original_base_sha or (await git.base_revision() if git else None)
+            attempt_offset = record.last_attempt.attempt_no if record.last_attempt else 0
         else:
             master_run_id = new_id("mrun")
             graph = await self._planner.plan(task)
-        original_base = await git.base_revision() if git else None
+            original_base = await git.base_revision() if git else None
         await self._run_store.save_run(
             master_run_id=master_run_id, session_id=session_id, task=task,
             graph=graph, status="running", original_base_sha=original_base,
@@ -122,6 +131,7 @@ class MasterRuntime:
 
         while attempts < max_attempts:
             attempts += 1
+            attempt_no = attempt_offset + attempts  # 恢复时接着已有 attempt_no，避免 PK 冲突
             candidate = (
                 await git.create_candidate(original_base)
                 if git and original_base is not None
@@ -129,7 +139,7 @@ class MasterRuntime:
             )
             if candidate is not None:
                 await self._save_attempt(
-                    master_run_id, attempts, AttemptState.RUNNING,
+                    master_run_id, attempt_no, AttemptState.RUNNING,
                     original_base=original_base, candidate_branch=candidate.branch_name,
                 )
             result = await self._scheduler.run(
@@ -139,12 +149,12 @@ class MasterRuntime:
             candidate_sha = await git.head(candidate.root) if (git and candidate) else None
             if candidate is not None:
                 await self._update_attempt(
-                    master_run_id, attempts, AttemptState.CANDIDATE_FROZEN,
+                    master_run_id, attempt_no, AttemptState.CANDIDATE_FROZEN,
                     candidate_sha=candidate_sha,
                 )
             target = await self._build_target(git, original_base, candidate_sha)
             if candidate is not None:
-                await self._update_attempt(master_run_id, attempts, AttemptState.VERIFYING)
+                await self._update_attempt(master_run_id, attempt_no, AttemptState.VERIFYING)
             verdict = await self._verifier.verify(current_task, graph, result, target)
 
             steps_ok = not result.failed and not result.blocked
@@ -153,16 +163,16 @@ class MasterRuntime:
             if accept and git and candidate_sha and original_base is not None:
                 # PROMOTING 必须在 git.promote 之前落库（带 candidate_sha）→ 崩溃恢复可幂等判定。
                 await self._update_attempt(
-                    master_run_id, attempts, AttemptState.PROMOTING, candidate_sha=candidate_sha
+                    master_run_id, attempt_no, AttemptState.PROMOTING, candidate_sha=candidate_sha
                 )
                 promoted = await git.promote(candidate_sha, expected_base=original_base)
                 await self._discard_attempt(candidate, result)
                 if promoted:
-                    await self._update_attempt(master_run_id, attempts, AttemptState.PROMOTED)
+                    await self._update_attempt(master_run_id, attempt_no, AttemptState.PROMOTED)
                     integrated_ok, promoted_sha, reason = True, candidate_sha, verdict.reason
                     break
                 await self._update_attempt(
-                    master_run_id, attempts, AttemptState.DISCARDED, verdict="base_stale"
+                    master_run_id, attempt_no, AttemptState.DISCARDED, verdict="base_stale"
                 )
                 reason = "真实 base 被外部推进(BASE_STALE)，已放弃本次推进"
                 original_base = await git.base_revision()  # 刷新后重试
@@ -177,7 +187,8 @@ class MasterRuntime:
             )
             if candidate is not None:
                 await self._update_attempt(
-                    master_run_id, attempts, AttemptState.DISCARDED, verdict=reason[:200] or "reject"
+                    master_run_id, attempt_no, AttemptState.DISCARDED,
+                    verdict=reason[:200] or "reject",
                 )
             await self._discard_attempt(candidate, result)
             if attempts >= max_attempts:
@@ -214,6 +225,70 @@ class MasterRuntime:
             integrated=integrated_ok,
             deferred_actions=tuple(deferred),
         )
+
+    async def _try_recover(
+        self, record: "RunRecord", git: GitWorktreeWorkspaceManager | None
+    ) -> FinalResult | None:
+        """幂等恢复：若 run 已完成 / promote 已发生（或可安全补做），直接返回结果；
+        否则返回 None 交由调用方回收孤儿后从持久 original_base 重开。"""
+        if record.status == "success":
+            return self._recovered_result(record, reason="run 已完成（恢复无操作）")
+        last = record.last_attempt
+        if last is None or git is None:
+            return None
+        if last.state == AttemptState.PROMOTED:
+            await self._run_store.update_run_status(
+                record.master_run_id, "success", promoted_sha=last.candidate_sha
+            )
+            return self._recovered_result(record, reason="已 promote（恢复补记 success）")
+        if last.state == AttemptState.PROMOTING and last.candidate_sha:
+            head = await git.head()
+            if head == last.candidate_sha:
+                # promote 其实已成功、只是状态没落库 → 识别为已完成，绝不重复推进。
+                await self._finish_recovered_promote(record, last.attempt_no, last.candidate_sha)
+                return self._recovered_result(record, reason="promote 已成功（恢复识别，未重推）")
+            if last.original_base_sha and head == last.original_base_sha:
+                try:
+                    promoted = await git.promote(
+                        last.candidate_sha, expected_base=last.original_base_sha
+                    )
+                except Exception:
+                    promoted = False
+                if promoted:
+                    await self._finish_recovered_promote(
+                        record, last.attempt_no, last.candidate_sha
+                    )
+                    return self._recovered_result(record, reason="promote 恢复重试成功")
+            # HEAD 既非 candidate 也非 original_base（BASE_STALE），或重试失败 → 丢弃重开。
+            await self._update_attempt(
+                record.master_run_id, last.attempt_no, AttemptState.DISCARDED,
+                verdict="base_stale(recover)",
+            )
+        return None
+
+    async def _finish_recovered_promote(
+        self, record: "RunRecord", attempt_no: int, candidate_sha: str
+    ) -> None:
+        await self._update_attempt(record.master_run_id, attempt_no, AttemptState.PROMOTED)
+        await self._run_store.update_run_status(
+            record.master_run_id, "success", promoted_sha=candidate_sha
+        )
+
+    def _recovered_result(self, record: "RunRecord", *, reason: str) -> FinalResult:
+        return FinalResult(
+            task=record.task,
+            accepted=True,
+            reason=reason,
+            master_run_id=record.master_run_id,
+            scheduler=None,
+            integrated=True,
+        )
+
+    async def _reclaim_orphans(
+        self, record: "RunRecord", git: GitWorktreeWorkspaceManager | None
+    ) -> None:
+        """回收崩溃遗留的孤儿 worktree/branch（8d 实现）。"""
+        return None
 
     async def _build_target(
         self,
