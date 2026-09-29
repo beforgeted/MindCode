@@ -65,6 +65,10 @@ class RunRecord:
     max_parallel: int = 0
     wall_s: float = 0.0
     base_moved: bool = False
+    checks_passed: bool = False  # 仅 scenario.checks（产物断言）是否全过，独立于 integrated
+    llm_calls: int = 0
+    in_tokens: int = 0
+    out_tokens: int = 0
     failures: list[str] = field(default_factory=list)  # 失败判据/原因，供排查
 
 
@@ -98,6 +102,9 @@ async def _run_once(scenario: Scenario, *, keep: bool) -> RunRecord:
     rec.stale = _counter(snap, "integration.stale")
     rec.integrations = _counter(snap, "scheduler.integrations")
     rec.conflicts = _counter(snap, "integration.conflicts")
+    rec.llm_calls = _counter(snap, "llm.calls")
+    rec.in_tokens = _counter(snap, "llm.input_tokens")
+    rec.out_tokens = _counter(snap, "llm.output_tokens")
     sched = final.scheduler
     if sched is not None:
         rec.steps_integrated = len(sched.integrated)
@@ -127,10 +134,13 @@ def _score(
     # 期望成功的场景：base 应确实前进了（promote 发生过）。
     if scenario.expect_integrated and current_head == initial_head:
         rec.failures.append("期望完成但 base 未推进")
+    checks_ok = True
     for check in scenario.checks:
         result = check(repo)
         if not result.ok:
+            checks_ok = False
             rec.failures.append(result.detail)
+    rec.checks_passed = checks_ok
     rec.ok = not rec.failures
 
 

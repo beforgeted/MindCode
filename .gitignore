@@ -11,4 +11,5 @@ build/
 .env
 # 场景套件是 main 的正式资产；仅忽略其运行产物（真实 LLM 结果明细）
 scenarios/last_report.json
+scenarios/last_benchmark.json
 scenarios/__pycache__/
