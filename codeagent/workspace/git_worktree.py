@@ -188,7 +188,7 @@ class GitWorktreeWorkspaceManager:
         entries: list[tuple[Path, str | None]] = []
         path: Path | None = None
         branch: str | None = None
-        for line in out.splitlines() + [""]:
+        for line in [*out.splitlines(), ""]:
             if line.startswith("worktree "):
                 path = Path(line[len("worktree ") :]).resolve()
                 branch = None

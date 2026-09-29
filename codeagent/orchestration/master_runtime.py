@@ -237,7 +237,7 @@ class MasterRuntime:
         )
 
     async def _try_recover(
-        self, record: "RunRecord", git: GitWorktreeWorkspaceManager | None
+        self, record: RunRecord, git: GitWorktreeWorkspaceManager | None
     ) -> FinalResult | None:
         """幂等恢复：若 run 已完成 / promote 已发生（或可安全补做），直接返回结果；
         否则返回 None 交由调用方回收孤儿后从持久 original_base 重开。"""
@@ -277,14 +277,14 @@ class MasterRuntime:
         return None
 
     async def _finish_recovered_promote(
-        self, record: "RunRecord", attempt_no: int, candidate_sha: str
+        self, record: RunRecord, attempt_no: int, candidate_sha: str
     ) -> None:
         await self._update_attempt(record.master_run_id, attempt_no, AttemptState.PROMOTED)
         await self._run_store.update_run_status(
             record.master_run_id, "success", promoted_sha=candidate_sha
         )
 
-    def _recovered_result(self, record: "RunRecord", *, reason: str) -> FinalResult:
+    def _recovered_result(self, record: RunRecord, *, reason: str) -> FinalResult:
         return FinalResult(
             task=record.task,
             accepted=True,
@@ -295,7 +295,7 @@ class MasterRuntime:
         )
 
     async def _reclaim_orphans(
-        self, record: "RunRecord", git: GitWorktreeWorkspaceManager | None
+        self, record: RunRecord, git: GitWorktreeWorkspaceManager | None
     ) -> None:
         """回收崩溃遗留的孤儿 worktree/branch。resume 将开全新 attempt，旧分支全是孤儿。"""
         if git is None:

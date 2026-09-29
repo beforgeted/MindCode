@@ -7,8 +7,8 @@ upsert 幂等）。恢复时重建 TaskGraph、**不重新 plan**，避免图漂
 /DISCARDED），`PROMOTING` 在调用 `git.promote` **之前**落库并带 `candidate_sha`。resume 时：
 run 已 success 或末尾 attempt 已 PROMOTED → 幂等返回；末尾 attempt 处于 `PROMOTING`（崩溃危险窗口）
 → 比对真实 base HEAD 与 candidate_sha/original_base_sha 决定"已成功不重推 / 安全重试 / BASE_STALE"；
-其它状态 → 回收孤儿 worktree/branch 后，从**持久化的** `original_base_sha`（非当前 HEAD）开新 Attempt
-重跑整张图。BASE_STALE 与语义 replan 走**独立预算**。step_outcome 仍作审计/可观测。
+其它状态 → 回收孤儿 worktree/branch 后，从**持久化的** `original_base_sha`（非当前 HEAD）重开
+新 Attempt 重跑整张图。BASE_STALE 与语义 replan 走**独立预算**。step_outcome 仍作审计/可观测。
 
 设计：SQLite + WAL + `asyncio.to_thread`，风格对齐 memory/sqlite_store.py；默认 NullRunStore
 （no-op）：单测 / 不需要持久化时零成本。

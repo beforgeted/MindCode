@@ -43,6 +43,12 @@ def _status_porcelain(repo: Path) -> str:
     ).stdout
 
 
+def _git_out(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True
+    ).stdout.strip()
+
+
 def _config(repo: Path) -> AppConfig:
     return AppConfig(
         workspace_root=repo,
@@ -58,7 +64,6 @@ def _config(repo: Path) -> AppConfig:
 @pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
 async def test_base_stale_and_replan_budgets_are_separate(tmp_path: Path):
     """P8e：BASE_STALE 消耗 promote 重试预算，reject 消耗 replan 预算，互不侵占。"""
-    from codeagent.context.profile import ContextProfile
     from codeagent.orchestration.global_verifier import GlobalVerdict
 
     async def _run_case(*, reject: bool, promote_fails: bool) -> dict:
@@ -116,22 +121,18 @@ async def test_reclaim_orphans_removes_leftover_worktrees_and_branches(tmp_path:
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_repo(repo)
-    base = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
+    base = _git_out(repo, "rev-parse", "HEAD")
     wsm = GitWorktreeWorkspaceManager(repo, repo / ".home" / "wt")
 
     cand = await wsm.create_candidate(base)
-    worker = await wsm.create("run_orphan", base_ref=cand.branch_name)
+    await wsm.create("run_orphan", base_ref=cand.branch_name)
     assert _worktree_count(repo) == 3  # main + candidate + worker
 
     removed = await wsm.reclaim_orphans(keep_branches=set())
 
     assert removed == 2
     assert _worktree_count(repo) == 1  # 只剩主工作树
-    branches = subprocess.run(
-        ["git", "-C", str(repo), "branch", "--list", "codeagent/*"], capture_output=True, text=True
-    ).stdout.strip()
+    branches = _git_out(repo, "branch", "--list", "codeagent/*")
     assert branches == ""  # codeagent/* 分支全部清除
 
 
