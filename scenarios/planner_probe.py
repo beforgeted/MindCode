@@ -89,15 +89,36 @@ def _files_of(instruction: str) -> set[str]:
     return {m.group(0).lstrip("./") for m in _FILE_RE.finditer(instruction)}
 
 
+def _dep_closure(graph: TaskGraph) -> dict[str, set[str]]:
+    """每个 Step 的**传递**依赖闭包（fixpoint，同 TaskGraph.blocked_by 的思路）。"""
+    closure = {s.id: set(s.dependencies) for s in graph.steps}
+    changed = True
+    while changed:
+        changed = False
+        for ds in closure.values():
+            add: set[str] = set()
+            for d in ds:
+                add |= closure.get(d, set())
+            if not add <= ds:
+                ds |= add
+                changed = True
+    return closure
+
+
 def _concurrent_same_file(graph: TaskGraph) -> set[str]:
-    """返回被"两个互不依赖的 Step"同时提及的文件名（计划层制造的写写重叠风险）。"""
+    """返回被"两个互不依赖的 Step"同时提及的文件名（计划层制造的写写重叠风险）。
+
+    有序判定用**传递闭包**：a→b→c 里 a 与 c 虽无直接边，但 c 传递依赖 a → 有先后、不算并发。
+    只有任一方向都不可达的两步才算真正并发（消除 008 里"只看直接边"的假阳性）。
+    """
     steps = list(graph.steps)
+    closure = _dep_closure(graph)
     risky: set[str] = set()
     for i, a in enumerate(steps):
         fa = _files_of(a.instruction)
         for b in steps[i + 1 :]:
-            # 直接依赖关系任一方向存在 → 有先后，不算并发
-            if b.id in a.dependencies or a.id in b.dependencies:
+            # 任一方向（传递）可达 → 有先后，不算并发
+            if b.id in closure.get(a.id, set()) or a.id in closure.get(b.id, set()):
                 continue
             risky |= fa & _files_of(b.instruction)
     return risky
