@@ -13,6 +13,7 @@ from collections.abc import Callable, Sequence
 from typing import TypeAlias
 
 from codeagent.infra.ids import new_id, new_llm_call_id
+from codeagent.infra.metrics import LLM_CALLS, LLM_INPUT_TOKENS, LLM_OUTPUT_TOKENS, Metrics
 from codeagent.llm.message import Block, Message, TextBlock, ToolUseBlock
 from codeagent.llm.types import LlmResponse, ModelConfig, ToolSpec, Usage
 
@@ -26,6 +27,10 @@ class StubLlmClient:
         self._script = list(script)
         self._index = 0
         self.seen_calls: list[tuple[Message, ...]] = []
+        self._metrics: Metrics | None = None
+
+    def bind_metrics(self, metrics: Metrics) -> None:
+        self._metrics = metrics
 
     @property
     def call_count(self) -> int:
@@ -41,10 +46,16 @@ class StubLlmClient:
         self.seen_calls.append(tuple(messages))
         if self._index >= len(self._script):
             # 脚本耗尽：给一条终止回复，避免测试悬挂。
-            return LlmResponse(new_llm_call_id(), "stub: script exhausted")
-        item = self._script[self._index]
-        self._index += 1
-        return self._materialize(item, messages)
+            response = LlmResponse(new_llm_call_id(), "stub: script exhausted")
+        else:
+            item = self._script[self._index]
+            self._index += 1
+            response = self._materialize(item, messages)
+        if self._metrics is not None:
+            self._metrics.incr(LLM_CALLS)
+            self._metrics.incr(LLM_INPUT_TOKENS, response.usage.input_tokens)
+            self._metrics.incr(LLM_OUTPUT_TOKENS, response.usage.output_tokens)
+        return response
 
     async def count_tokens(
         self,

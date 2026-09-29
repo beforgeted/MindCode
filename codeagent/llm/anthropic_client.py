@@ -64,6 +64,10 @@ class AnthropicLlmClient:
             return kwargs
         return {k: v for k, v in kwargs.items() if k in allowed}
 
+    def bind_metrics(self, metrics: Metrics) -> None:
+        """让调用方（AgentSession）把自己的 Metrics 注入，使 llm.* 指标落到同一实例。"""
+        self._metrics = metrics
+
     async def chat(
         self,
         messages: Sequence[Message],

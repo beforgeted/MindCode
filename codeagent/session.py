@@ -53,6 +53,11 @@ class AgentSession:
         self.config = config
         self.session_id = session_id or new_session_id()
         self.metrics = Metrics()
+        # A1：把 session 的 Metrics 注入 LLM 客户端，使 llm.* 指标（calls/tokens）落到同一实例，
+        # 否则 client 用自建 Metrics，/metrics 里的 token/成本恒为 0。
+        bind = getattr(llm_client, "bind_metrics", None)
+        if callable(bind):
+            bind(self.metrics)
 
         self.event_store = JsonlEventStore(config.state_root)
         self.artifact_store = FileArtifactStore(config.state_root)

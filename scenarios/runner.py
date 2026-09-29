@@ -91,10 +91,8 @@ async def _run_once(scenario: Scenario, *, keep: bool) -> RunRecord:
     started = time.perf_counter()
     try:
         async with MasterSession(config, llm_client=client, planner=planner) as ms:
-            # 观测：把 LLM 客户端的计数并到 session.metrics，才能采到 tokens/calls
-            # （AgentSession 自建 metrics，而 client 在其之前构造）。仅观测，不改运行时。
-            if hasattr(client, "_metrics"):
-                client._metrics = ms.session.metrics  # type: ignore[attr-defined]
+            # token/calls 由 AgentSession 的 bind_metrics 自动并入 session.metrics（见 A1），
+            # 无需再手动 rebind。
             final = await ms.run_task(scenario.task)
             snap = ms.session.metrics.snapshot()
     finally:
