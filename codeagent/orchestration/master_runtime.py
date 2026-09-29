@@ -208,7 +208,10 @@ class MasterRuntime:
             graph = await self._planner.plan(current_task)
 
         assert result is not None and verdict is not None
-        await self._memory_writer.collect_and_stage(result.workers)
+        # 只 stage 成功 promote（或非 git accept）那次 Attempt 的 Worker 候选；
+        # 被丢弃的 Attempt（reject / BASE_STALE / 失败）不 stage（不变式 1、5，C7）。
+        if integrated_ok:
+            await self._memory_writer.collect_and_stage(result.workers)
 
         files: list[FileState] = []
         evidence: list[EvidenceRef] = []

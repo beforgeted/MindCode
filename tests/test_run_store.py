@@ -48,7 +48,9 @@ class CountingRuntime:
         )
 
 
-def _master(graph, runtime, store, *, tmp: Path) -> MasterRuntime:
+def _master(
+    graph, runtime, store, *, tmp: Path, memory_writer=None, verifier=None
+) -> MasterRuntime:
     scheduler = StepScheduler(
         agent_runtime=runtime,  # type: ignore[arg-type]
         agent_registry=AgentRegistry(default=_DEFN),
@@ -58,9 +60,10 @@ def _master(graph, runtime, store, *, tmp: Path) -> MasterRuntime:
     return MasterRuntime(
         planner=StaticPlanner(graph),
         scheduler=scheduler,
-        global_verifier=NoFailureVerifier(),
+        global_verifier=verifier or NoFailureVerifier(),
         workspace_manager=LocalWorkspaceManager(tmp),
         run_store=store,
+        memory_writer=memory_writer,
     )
 
 
@@ -153,6 +156,44 @@ async def test_promoted_sha_and_status(tmp_path: Path):
     assert record is not None
     assert record.status == "success"
     assert record.promoted_sha == "promoted123"
+
+
+class _RecordingWriter:
+    def __init__(self) -> None:
+        self.staged: list = []
+
+    async def collect_and_stage(self, workers) -> None:
+        self.staged.append(workers)
+
+
+class _RejectVerifier:
+    async def verify(self, task, graph, results, target=None):
+        from codeagent.orchestration.global_verifier import GlobalVerdict
+
+        return GlobalVerdict(accept=False, reason="不接受")
+
+
+async def test_candidates_staged_only_on_success(tmp_path: Path):
+    store = SqliteRunStore(tmp_path / "runs.db")
+    await store.start()
+    writer = _RecordingWriter()
+    master = _master(_graph(), CountingRuntime(), store, tmp=tmp_path, memory_writer=writer)
+    final = await master.run("A", session_id="s")
+    assert final.accepted
+    assert len(writer.staged) == 1  # 成功 → stage 一次
+
+
+async def test_candidates_not_staged_on_reject(tmp_path: Path):
+    store = SqliteRunStore(tmp_path / "runs.db")
+    await store.start()
+    writer = _RecordingWriter()
+    master = _master(
+        _graph(), CountingRuntime(), store,
+        tmp=tmp_path, memory_writer=writer, verifier=_RejectVerifier(),
+    )
+    final = await master.run("A", session_id="s")
+    assert not final.accepted
+    assert writer.staged == []  # 被丢弃的 Attempt → 不 stage（不变式 1、5）
 
 
 async def test_resume_reruns_whole_attempt(tmp_path: Path):

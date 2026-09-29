@@ -39,6 +39,7 @@ from codeagent.orchestration.shared_memory import (
     SupervisorWriter,
 )
 from codeagent.orchestration.step_scheduler import StepScheduler
+from codeagent.orchestration.worker_harvester import EventWorkerHarvester
 from codeagent.runtime.agent_runtime import AgentRuntime
 from codeagent.runtime.local_verifier import LlmLocalVerifier, LocalVerifier, StatusLocalVerifier
 from codeagent.runtime.react_engine import ReActEngine
@@ -80,6 +81,11 @@ async def build_master(
         local_verifier=lverif,
         event_store=event_store,
         metrics=metrics,
+        candidate_harvester=(
+            EventWorkerHarvester(event_store, config.effective_project_id)
+            if memory_store is not None
+            else None
+        ),
     )
     scheduler = StepScheduler(
         agent_runtime=runtime,
