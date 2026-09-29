@@ -99,8 +99,9 @@ pyright             # 类型
 
 ## 未实现（按分期）
 
-- **验证缺口**：真实模型 Planner/Verifier 大规模 benchmark；Worker 候选自动抽取器
-  （`AgentRuntime.candidate_harvester`）的默认接线。（**P8 起**已有 Attempt 级幂等崩溃恢复：
+- **验证缺口**：**P9 起**已有小规模质量 benchmark（`scenarios/benchmark.py`，19 任务×4 维度分层，
+  产成功率/首次成功率/假接受/成本聚合）；SWE-bench 全集待接（仅留接入笔记）。Worker 候选自动抽取器
+  （`AgentRuntime.candidate_harvester`）的默认接线待做。（P8 起 Attempt 级幂等崩溃恢复：
   PROMOTING 窗口按真实 base HEAD 判定不重复推进、孤儿 worktree/branch 回收、BASE_STALE 独立预算。）
 - **外部副作用隔离**：Master Attempt 的 candidate 只隔离仓库内文件；Worker 的外部副作用
   （API/DB/树外写/发布/`run_command` 写绝对路径）不被事务覆盖，需后续用幂等键 / 两阶段提交 /

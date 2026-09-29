@@ -77,3 +77,31 @@ python -m scenarios.runner --env /path/to/.env      # 指定 .env
 `reruns == 1` 这类是很好的回归信号，但更适合"落在预期区间"而非钉死精确值——模型换代后
 个别场景多重跑一次仍算健康，真正不能变的是上面几条正确性不变式。
 
+## 质量 Benchmark（Phase 9，`scenarios/benchmark.py`）
+
+场景套件之上的**量化基线**：19 个任务按 维度×难度 分层，产出成功率 / 首次成功率 / 假接受 /
+平均重跑·兜底 / 每任务耗时·token 的聚合指标（分 overall / dimension / tier）。同样 opt-in。
+
+```bash
+python -m scenarios.benchmark                       # 全部 19 个任务，各 1 次
+python -m scenarios.benchmark --dimension planner   # 只跑某维度
+python -m scenarios.benchmark --repeat 2            # 每个跑 2 次看稳定性
+```
+
+- 维度 `planner`（真实拆图）/ `worker`（明确指令固定图）/ `verifier`（确定性验收正负例）/
+  `integration`（依赖链/重叠/冲突）。
+- **假接受** = `integrated=True` 但产物断言没过（验证器放行了错产物），可精确测；**假拒绝**近似为
+  "期望成功却未达成"，标注不能纯归因 verifier。
+- 结果写 `scenarios/last_benchmark.json`（gitignore）。聚合是纯函数，见 `tests/test_benchmark.py`。
+
+## Planner 规划质量探针（`scenarios/planner_probe.py`）
+
+只调真实 `LlmPlanner.plan()`，采样拆图形状 + 依赖边 + **并发同文件写风险**（用依赖**传递闭包**判有序，
+a→b→c 不误报）。`python -m scenarios.planner_probe --samples 5`。
+
+## SWE-bench（未接，接入笔记）
+
+全集需容器化 + 大量依赖，本期不接。接单个实例的路径：clone 实例 repo 当 sandbox →
+用其 `FAIL_TO_PASS` 测试当 `CODEAGENT_VERIFY_CMD` → 跑 `/task` → 看确定性验收转绿。等核心更稳再接少量实例。
+
+
