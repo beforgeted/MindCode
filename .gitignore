@@ -13,3 +13,6 @@ build/
 scenarios/last_report.json
 scenarios/last_benchmark.json
 scenarios/__pycache__/
+# 内部优化/对比工作文档（不入库）
+MindCode_优化方案.md
+MindCode_Harness架构对比_优势与不足.md
