@@ -8,8 +8,9 @@ DeferredAction 进 run 级队列；验收通过 + CAS promote 成功后再由上
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from codeagent.infra.ids import new_id
 from codeagent.tool.effects import EffectKind, RetryPolicy
 
 
@@ -19,6 +20,9 @@ class DeferredAction:
     effect: EffectKind
     retry: RetryPolicy
     reason: str = ""
+    cwd: str = ""
+    # 幂等键：post-promote 执行时用于去重（崩溃恢复不重复执行已成功条目）。
+    id: str = field(default_factory=lambda: new_id("defer"))
 
 
 __all__ = ["DeferredAction"]

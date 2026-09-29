@@ -18,6 +18,7 @@ from types import TracebackType
 from codeagent.agent.models import AgentDefinition
 from codeagent.agent.registry import AgentRegistry
 from codeagent.config import AppConfig
+from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.evidence.event_store import RawEventStore
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
@@ -44,6 +45,7 @@ from codeagent.runtime.agent_runtime import AgentRuntime
 from codeagent.runtime.local_verifier import LlmLocalVerifier, LocalVerifier, StatusLocalVerifier
 from codeagent.runtime.react_engine import ReActEngine
 from codeagent.session import AgentSession
+from codeagent.tool.approval import DenyExternalApprovalPolicy, InteractiveApprovalPolicy
 from codeagent.workspace.manager import build_workspace_manager
 
 
@@ -61,6 +63,7 @@ async def build_master(
     global_verifier: GlobalVerifier | None = None,
     memory_store: MemoryGovernanceRepository | None = None,
     run_store: RunStore | None = None,
+    artifact_store: ArtifactStore | None = None,
 ) -> MasterRuntime:
     """装配 MasterRuntime。stub LLM 下 Verifier 用确定性实现，真实模型下用 LLM 实现。"""
     model_config = ModelConfig(
@@ -114,6 +117,12 @@ async def build_master(
         memory_writer=memory_writer,
         run_store=run_store,
         metrics=metrics,
+        approval_policy=(
+            InteractiveApprovalPolicy()
+            if config.interactive_approval
+            else DenyExternalApprovalPolicy()
+        ),
+        artifact_store=artifact_store,
     )
 
 
@@ -152,6 +161,7 @@ class MasterSession:
             planner=self._planner,
             local_verifier=self._local_verifier,
             global_verifier=self._global_verifier,
+            artifact_store=self.session.artifact_store,
         )
         return self
 

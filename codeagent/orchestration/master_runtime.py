@@ -17,7 +17,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from codeagent.agent.models import FileState
+from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.evidence.models import EvidenceRef
+from codeagent.infra.cancellation import CancellationToken
 from codeagent.infra.ids import new_id
 from codeagent.infra.metrics import Metrics
 from codeagent.orchestration.global_verifier import GlobalVerifier, VerificationTarget
@@ -33,7 +35,11 @@ from codeagent.orchestration.run_store import (
 from codeagent.orchestration.shared_memory import NullSupervisorMemoryWriter, SupervisorWriter
 from codeagent.orchestration.step_scheduler import SchedulerResult, StepScheduler
 from codeagent.runtime.agent_runtime import WorkerRun
+from codeagent.tool.approval import ApprovalPolicy, DenyExternalApprovalPolicy
+from codeagent.tool.command_policy import CommandDecision
 from codeagent.tool.deferred import DeferredAction
+from codeagent.tool.effects import RetryPolicy
+from codeagent.tool.executor import CommandExecutor, LocalExecutor
 from codeagent.workspace.context import WorkspaceContext
 from codeagent.workspace.git_worktree import GitWorktreeWorkspaceManager
 from codeagent.workspace.manager import WorkspaceManager
@@ -56,6 +62,10 @@ class FinalResult:
     # 推测期被拦下的外部副作用（跨 Worker 汇总）。promote 后按 ApprovalPolicy 处理；
     # 最小实现：非交互默认只上报、不执行。
     deferred_actions: tuple[DeferredAction, ...] = ()
+    # post-promote 外部动作执行统计（A2）。
+    deferred_executed: int = 0
+    deferred_failed: int = 0
+    deferred_skipped: int = 0
 
 
 class MasterRuntime:
@@ -72,6 +82,9 @@ class MasterRuntime:
         memory_writer: SupervisorWriter | None = None,
         run_store: RunStore | None = None,
         metrics: Metrics | None = None,
+        approval_policy: ApprovalPolicy | None = None,
+        command_executor: CommandExecutor | None = None,
+        artifact_store: ArtifactStore | None = None,
     ) -> None:
         self._planner = planner
         self._scheduler = scheduler
@@ -83,6 +96,11 @@ class MasterRuntime:
         self._memory_writer = memory_writer or NullSupervisorMemoryWriter()
         self._run_store = run_store or NullRunStore()
         self._metrics = metrics or Metrics()
+        # A2：post-promote 执行被延后的外部动作。默认 fail-safe 拒绝；
+        # 无 artifact_store 则只上报不执行。
+        self._approval = approval_policy or DenyExternalApprovalPolicy()
+        self._executor = command_executor or LocalExecutor()
+        self._artifacts = artifact_store
 
     async def run(
         self,
@@ -224,6 +242,10 @@ class MasterRuntime:
         await self._run_store.update_run_status(
             master_run_id, "success" if integrated_ok else "failed", promoted_sha=promoted_sha
         )
+        # A2：promote 成功后才执行被延后的外部动作（在真实 base workspace）；否则不执行。
+        ex = fa = sk = 0
+        if integrated_ok and deferred:
+            ex, fa, sk = await self._execute_deferred(deferred, cancellation)
         return FinalResult(
             task=task,
             accepted=integrated_ok,
@@ -237,7 +259,57 @@ class MasterRuntime:
             replans=max(0, attempts - 1),
             integrated=integrated_ok,
             deferred_actions=tuple(deferred),
+            deferred_executed=ex,
+            deferred_failed=fa,
+            deferred_skipped=sk,
         )
+
+    async def _execute_deferred(
+        self, deferred: list[DeferredAction], cancellation: CancellationToken | None
+    ) -> tuple[int, int, int]:
+        """post-promote 逐条处理延后的外部动作：审批 → 在真实 base 执行。
+
+        无 artifact_store（编程/测试装配未提供）时一律只上报不执行（skipped）。
+        NEVER 只尝试一次；IDEMPOTENT 允许有限重试。执行失败不回滚已 promote 的 Git 成果。
+        """
+        git = self._wsm if isinstance(self._wsm, GitWorktreeWorkspaceManager) else None
+        repo_root = git.repo_root if git else None
+        executed = failed = skipped = 0
+        seen: set[str] = set()
+        for action in deferred:
+            if action.id in seen:  # 同一条动作只处理一次（幂等键）
+                continue
+            seen.add(action.id)
+            approved = await self._approval.approve(
+                _decision_of(action), command=action.command
+            )
+            if not approved or self._artifacts is None or repo_root is None:
+                skipped += 1
+                self._metrics.incr("master.deferred_skipped")
+                continue
+            attempts_left = 2 if action.retry is RetryPolicy.IDEMPOTENT else 1
+            ok = False
+            while attempts_left > 0 and not ok:
+                attempts_left -= 1
+                try:
+                    outcome = await self._executor.run(
+                        command=action.command,
+                        cwd=repo_root,
+                        cancellation=cancellation or CancellationToken(),
+                        artifact_store=self._artifacts,
+                        max_output_bytes=1 << 20,
+                        metadata={"deferred": action.id},
+                    )
+                    ok = outcome.exit_code == 0
+                except Exception:
+                    ok = False
+            if ok:
+                executed += 1
+                self._metrics.incr("master.deferred_executed")
+            else:
+                failed += 1
+                self._metrics.incr("master.deferred_failed")
+        return executed, failed, skipped
 
     async def _try_recover(
         self, record: RunRecord, git: GitWorktreeWorkspaceManager | None
@@ -390,6 +462,13 @@ class MasterRuntime:
                 await self._wsm.cleanup(candidate, keep=False)
             except Exception:
                 self._metrics.incr("master.cleanup_failures")
+
+
+def _decision_of(action: DeferredAction) -> CommandDecision:
+    return CommandDecision(
+        allowed=True, effect=action.effect, retry=action.retry,
+        needs_approval=True, reason=action.reason,
+    )
 
 
 def _to_outcome(step_id: str, worker: WorkerRun, integrated: bool) -> StepOutcome:

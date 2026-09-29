@@ -123,6 +123,7 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
         definition=session.definition,
         memory_store=session.memory_store if session.memory_service.available else None,
         run_store=run_store,
+        artifact_store=session.artifact_store,
     )
     final = await master.run(
         goal, session_id=session.session_id, resume_master_run_id=resume_id
@@ -143,7 +144,11 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
         for state in final.files:
             print(f"  {state.change}: {state.path}")
     if final.deferred_actions:
-        print("[待处理] 以下外部副作用在推测执行阶段被拦下、未执行（需人工确认后再做）:")
+        print(
+            f"[外部动作] 推测期拦下 {len(final.deferred_actions)} 条外部副作用；"
+            f"promote 后执行 {final.deferred_executed} / 失败 {final.deferred_failed} / "
+            f"跳过(未批准) {final.deferred_skipped}:"
+        )
         for action in final.deferred_actions:
             print(f"  - {action.reason}: {action.command}")
     # 调试信息（非用户待办）：内部集成冲突/分支,仅供排查。

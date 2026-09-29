@@ -69,6 +69,7 @@ class RunCommandTool(BaseTool):
                             effect=decision.effect,
                             retry=decision.retry,
                             reason=decision.reason,
+                            cwd=str(arguments.get("cwd") or "."),
                         )
                     )
                 return ToolResult.error(
