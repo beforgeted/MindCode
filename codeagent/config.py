@@ -41,6 +41,9 @@ class AppConfig:
     # run_command 命令策略的配置化扩展（正则）。CODEAGENT_CMD_ALLOW/DENY，`;` 分隔。
     command_allowlist: tuple[str, ...] = ()
     command_denylist: tuple[str, ...] = ()
+    # 交互模式（REPL）：单 Agent 会话允许外部副作用并走 InteractiveApprovalPolicy 询问用户；
+    # 脚本/benchmark 默认 False（外部副作用一律拦成 DeferredAction）。
+    interactive_approval: bool = False
 
     @property
     def state_root(self) -> Path:

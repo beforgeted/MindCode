@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from codeagent.agent.models import RunStatus
@@ -253,7 +254,9 @@ def main(argv: list[str] | None = None) -> int:
     if loaded is not None:
         print(f"[已加载 {loaded}]")
     _repair_ca_env()
-    config = AppConfig.from_env(args.workspace)
+    # REPL 是交互模式：允许单 Agent 会话执行外部副作用命令，但每条经 InteractiveApprovalPolicy
+    # 询问用户（A3）。脚本/benchmark 用默认 AppConfig（interactive_approval=False）。
+    config = replace(AppConfig.from_env(args.workspace), interactive_approval=True)
     try:
         return asyncio.run(run_repl(config))
     except KeyboardInterrupt:

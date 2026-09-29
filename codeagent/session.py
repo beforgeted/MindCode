@@ -30,6 +30,7 @@ from codeagent.memory.retriever import KeywordMemoryRetriever
 from codeagent.memory.service import MemoryService
 from codeagent.memory.sqlite_store import SqliteMemoryStore
 from codeagent.runtime.react_engine import ReActEngine
+from codeagent.tool.approval import DenyExternalApprovalPolicy, InteractiveApprovalPolicy
 from codeagent.tool.builtin import default_tools
 from codeagent.tool.builtin.evidence_get import EvidenceGetTool
 from codeagent.tool.builtin.memory_get import MemoryGetTool
@@ -149,6 +150,11 @@ class AgentSession:
                 extra_allow=list(config.command_allowlist),
                 extra_deny=list(config.command_denylist),
             ),
+            approval_policy=(
+                InteractiveApprovalPolicy()
+                if config.interactive_approval
+                else DenyExternalApprovalPolicy()
+            ),
         )
         self.engine = ReActEngine(
             llm_client=llm_client,
@@ -162,12 +168,16 @@ class AgentSession:
         self.run = self._new_run()
 
     def _new_run(self) -> AgentRun:
-        return AgentRun.create(
+        run = AgentRun.create(
             self.definition,
             session_id=self.session_id,
             workspace=WorkspaceContext.local(self.config.workspace_root),
             event_store=self.event_store,
         )
+        # 交互模式下单 Agent 会话允许外部副作用（交 InteractiveApprovalPolicy 询问用户）；
+        # 非交互默认 False，外部副作用被拦成 DeferredAction（不变式 2）。
+        run.allow_external_effects = self.config.interactive_approval
+        return run
 
     async def __aenter__(self) -> AgentSession:
         await self.event_store.start()
