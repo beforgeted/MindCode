@@ -16,10 +16,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from codeagent.evidence.cursor import EventBatch, EventCursor, SequencedEvent
 from codeagent.evidence.models import AgentEvent, EventType
+from codeagent.infra.trace import current_trace
 
 _SENTINEL = object()
 
@@ -45,6 +47,9 @@ class JsonlEventStore:
     # --- 写入 ---
 
     def append_nowait(self, event: AgentEvent) -> None:
+        trace = current_trace()
+        if trace and "trace" not in event.payload:
+            event = replace(event, payload={**event.payload, "trace": trace})
         if self._closed:
             self.dropped += 1
             return

@@ -20,6 +20,7 @@ from codeagent.evidence.jsonl_event_store import JsonlEventStore
 from codeagent.infra.ids import new_session_id
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
+from codeagent.llm.observed_client import ObservedLlmClient, RoleLlmClient
 from codeagent.llm.types import ModelConfig
 from codeagent.memory.dedup import MemoryDeduplicator
 from codeagent.memory.governance_service import MemoryGovernanceService
@@ -54,13 +55,11 @@ class AgentSession:
         self.config = config
         self.session_id = session_id or new_session_id()
         self.metrics = Metrics()
-        # A1：把 session 的 Metrics 注入 LLM 客户端，使 llm.* 指标（calls/tokens）落到同一实例，
-        # 否则 client 用自建 Metrics，/metrics 里的 token/成本恒为 0。
-        bind = getattr(llm_client, "bind_metrics", None)
-        if callable(bind):
-            bind(self.metrics)
-
         self.event_store = JsonlEventStore(config.state_root)
+        self.llm_client = ObservedLlmClient(
+            llm_client, metrics=self.metrics, events=self.event_store, session_id=self.session_id,
+        )
+        llm_client = self.llm_client
         self.artifact_store = FileArtifactStore(config.state_root)
         self.memory_store = SqliteMemoryStore(config.state_root / "memory.db")
         self.memory_projector = MemoryIndexProjector(
@@ -89,7 +88,7 @@ class AgentSession:
             event_store=self.event_store,
             repository=self.memory_store,
             judge=LlmMemoryJudge(
-                llm_client,
+                RoleLlmClient(llm_client, "judge"),
                 ModelConfig(
                     model=config.model, context_window=config.profile.context_window
                 ),

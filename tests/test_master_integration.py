@@ -18,6 +18,91 @@ from codeagent.session import AgentSession
 _HAS_GIT = shutil.which("git") is not None
 
 
+@pytest.mark.skipif(not _HAS_GIT, reason="git 不可用")
+@pytest.mark.parametrize("window", ["before_promote", "after_promote", "save_failure", "reject"])
+async def test_deferred_manifest_survives_promote_crash(tmp_path: Path, window, monkeypatch):
+    from codeagent.evidence.artifact_store import FileArtifactStore
+    from codeagent.orchestration.global_verifier import GlobalVerdict, NoFailureVerifier
+    from codeagent.orchestration.run_store import SqliteRunStore
+    from codeagent.tool.approval import AllowExternalApprovalPolicy
+    from codeagent.tool.deferred import DeferredAction
+    from codeagent.tool.effects import EffectKind, RetryPolicy
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    config = _config(repo)
+    store = SqliteRunStore(repo / ".home" / "runs.db")
+    await store.start()
+    head_before = _git_out(repo, "rev-parse", "HEAD")
+    action = DeferredAction("echo once >> effect.txt", EffectKind.EXTERNAL_SIDE_EFFECT,
+                            RetryPolicy.NEVER)
+    saved_ids = []
+    save = store.save_deferred
+
+    async def save_manifest(run_id, attempt_no, actions):
+        saved_ids.append(run_id)
+        if window == "save_failure":
+            raise RuntimeError("manifest failure")
+        await save(run_id, attempt_no, actions)
+
+    monkeypatch.setattr(store, "save_deferred", save_manifest)
+    client = StubLlmClient([[('write_file', {"path": "a.txt", "content": "A"})], "done"])
+
+    class RejectVerifier:
+        async def verify(self, task, graph, results, target=None):
+            return GlobalVerdict(accept=False, reason="reject")
+
+    async with AgentSession(config, llm_client=client) as session:
+        master = await build_master(
+            config=config, llm_client=client, engine=session.engine,
+            event_store=session.event_store, metrics=session.metrics,
+            definition=session.definition,
+            planner=StaticPlanner(TaskGraph([Step("a", "default", "write a.txt")])),
+            global_verifier=RejectVerifier() if window == "reject" else NoFailureVerifier(),
+            run_store=store, artifact_store=FileArtifactStore(repo / ".home"),
+        )
+        master._max_replans = 0
+        master._approval = AllowExternalApprovalPolicy()
+        schedule = master._scheduler.run
+
+        async def with_action(*args, **kwargs):
+            result = await schedule(*args, **kwargs)
+            next(iter(result.workers.values())).run.deferred_actions.append(action)
+            return result
+
+        monkeypatch.setattr(master._scheduler, "run", with_action)
+        promote = master._wsm.promote  # type: ignore[attr-defined]
+
+        async def crashing_promote(*args, **kwargs):
+            assert saved_ids and await store.load_deferred(saved_ids[0], 1)
+            if window == "after_promote":
+                assert await promote(*args, **kwargs)
+            raise RuntimeError("promote crash")
+
+        monkeypatch.setattr(master._wsm, "promote", crashing_promote)
+        if window == "reject":
+            result = await master.run("write a", session_id=session.session_id)
+            assert not result.integrated and not saved_ids
+        else:
+            with pytest.raises(RuntimeError):
+                await master.run("write a", session_id=session.session_id)
+        assert not (repo / "effect.txt").exists()
+        if window in ("reject", "save_failure"):
+            assert _git_out(repo, "rev-parse", "HEAD") == head_before
+            return
+        monkeypatch.setattr(master._wsm, "promote", promote)
+        reopened = SqliteRunStore(repo / ".home" / "runs.db")
+        await reopened.start()
+        master._run_store = reopened
+        for _ in range(2):
+            result = await master.run("", session_id=session.session_id,
+                                      resume_master_run_id=saved_ids[0])
+            assert result.integrated and result.deferred_executed == 1
+        assert (repo / "effect.txt").read_text().split() == ["once"]
+        assert (repo / "a.txt").read_text() == "A"
+
+
 def _init_repo(root: Path) -> None:
     def run(*args):
         subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)

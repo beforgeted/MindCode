@@ -19,6 +19,7 @@ from codeagent.evidence.event_store import NullEventStore, RawEventStore
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.infra.ids import new_agent_run_id
 from codeagent.infra.metrics import Metrics
+from codeagent.infra.trace import trace_scope, update_trace
 from codeagent.memory.governance_models import MemoryCandidate
 from codeagent.orchestration.task_graph import Step
 from codeagent.runtime.local_verifier import AlwaysPassVerifier, LocalVerifier, VerificationResult
@@ -68,6 +69,17 @@ class AgentRuntime:
         self._metrics = metrics or Metrics()
 
     async def run(
+        self, definition: AgentDefinition, step: Step, *, session_id: str,
+        cancellation: CancellationToken | None = None, trace_id: str | None = None,
+        base_ref: str | None = None,
+    ) -> WorkerRun:
+        with trace_scope(session_id=session_id, step_id=step.id):
+            return await self._run(
+                definition, step, session_id=session_id, cancellation=cancellation,
+                trace_id=trace_id, base_ref=base_ref,
+            )
+
+    async def _run(
         self,
         definition: AgentDefinition,
         step: Step,
@@ -78,6 +90,7 @@ class AgentRuntime:
         base_ref: str | None = None,
     ) -> WorkerRun:
         run_id = new_agent_run_id()
+        update_trace(agent_run_id=run_id)
         workspace = await self._wsm.create(run_id, base_ref=base_ref)
         run = AgentRun(
             definition=definition,

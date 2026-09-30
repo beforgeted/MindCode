@@ -22,9 +22,9 @@ from codeagent.context.manager import ContextOverflowError
 from codeagent.llm.stub_client import StubLlmClient
 from codeagent.session import AgentSession
 
-BANNER = """MindCode CodeAgent (P0-P5 单/多 Agent)
+BANNER = """MindCode CodeAgent (P0-P9 单/多 Agent)
 命令: /context /compact /memory add|list|search|show|delete|harvest
-      /task <目标> /clear /metrics /quit
+      /task <目标> /trajectory <mrun_id> /clear /metrics /quit
 """
 
 
@@ -50,6 +50,27 @@ async def _handle_command(session: AgentSession, line: str, *, config, client) -
             print("用法: /task <目标>")
             return True
         await _run_task(session, config, client, rest)
+        return True
+
+    if command == "/trajectory":
+        from codeagent.observability import JsonTrajectoryExporter, render_trajectory
+        from codeagent.orchestration.run_store import SqliteRunStore
+
+        if not rest:
+            print("用法: /trajectory <mrun_id>")
+            return True
+        store = SqliteRunStore(config.state_root / "runs.db")
+        await store.start()
+        exporter = JsonTrajectoryExporter(config.state_root, store, session.event_store)
+        try:
+            report = await exporter.build(rest)
+            if not report["coverage"]["run_persisted"] and not report["llm_calls"]:
+                print(f"找不到任务记录: {rest}")
+                return True
+            print(render_trajectory(report))
+            print(f"[轨迹导出] {await exporter.export(rest)}")
+        except Exception as exc:
+            print(f"[轨迹导出失败] {type(exc).__name__}")
         return True
 
     if command == "/context":
@@ -100,7 +121,7 @@ async def _handle_command(session: AgentSession, line: str, *, config, client) -
 async def _run_task(session: AgentSession, config: AppConfig, client, goal: str) -> None:
     """P5/P6 Multi-Agent：规划 → 并行 Worker → 验收 → 合并。复用当前活着的 session。
 
-    `/task --resume <mrun_id>`：从 RunStore 恢复，跳过已完成 Step，只重跑未完成的。
+    `/task --resume <mrun_id>`：恢复 Attempt 或已合并任务的延后外部动作。
     """
     from codeagent.orchestration.master_session import build_master
     from codeagent.orchestration.run_store import SqliteRunStore
@@ -129,7 +150,10 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
         goal, session_id=session.session_id, resume_master_run_id=resume_id
     )
     # 只呈现任务级结果：integrated 全绿才算完成;冲突/分支属内部细节,不让用户处理。
-    if final.integrated:
+    if final.integrated and (final.deferred_failed or final.deferred_unknown
+                             or final.deferred_skipped):
+        print("\n[代码已合并，外部动作未全部完成] Git 成果保留，请核对下列动作结果。")
+    elif final.integrated:
         print(f"\n[任务完成] {final.reason}")
     else:
         print(f"\n[任务未完成] {final.reason or '内部集成未通过'}")
@@ -147,14 +171,21 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
         print(
             f"[外部动作] 推测期拦下 {len(final.deferred_actions)} 条外部副作用；"
             f"promote 后执行 {final.deferred_executed} / 失败 {final.deferred_failed} / "
-            f"跳过(未批准) {final.deferred_skipped}:"
+            f"跳过 {final.deferred_skipped} / 结果未知(需人工核对) {final.deferred_unknown}:"
         )
+        states = {r.action.id: r.state for r in final.deferred_records}
         for action in final.deferred_actions:
-            print(f"  - {action.reason}: {action.command}")
+            print(f"  - [{states.get(action.id, '未执行')}] {action.id}: {action.command}")
+        if final.deferred_unknown:
+            print("结果未知的动作不会自动重试，请先核对外部系统，避免重复副作用。")
     # 调试信息（非用户待办）：内部集成冲突/分支,仅供排查。
     if final.merge_conflicts:
         print(f"[调试] 内部集成冲突: {'; '.join(final.merge_conflicts)}")
     print(f"[调试] master_run_id={final.master_run_id}（未完成可 /task --resume 续跑）")
+    if final.trajectory_path:
+        print(f"[轨迹导出] {final.trajectory_path}")
+    elif final.trajectory_error:
+        print(f"[轨迹导出失败] {final.trajectory_error}，任务结果不受影响")
 
 
 async def run_repl(config: AppConfig) -> int:

@@ -9,6 +9,7 @@ DeferredAction 进 run 级队列；验收通过 + CAS promote 成功后再由上
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from codeagent.infra.ids import new_id
 from codeagent.tool.effects import EffectKind, RetryPolicy
@@ -21,8 +22,24 @@ class DeferredAction:
     retry: RetryPolicy
     reason: str = ""
     cwd: str = ""
-    # 幂等键：post-promote 执行时用于去重（崩溃恢复不重复执行已成功条目）。
+    # 本地动作身份；不是自动传递给外部服务的幂等键。
     id: str = field(default_factory=lambda: new_id("defer"))
 
 
-__all__ = ["DeferredAction"]
+class DeferredState(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredRecord:
+    action: DeferredAction
+    state: DeferredState = DeferredState.PENDING
+    attempts: int = 0
+
+
+__all__ = ["DeferredAction", "DeferredRecord", "DeferredState"]

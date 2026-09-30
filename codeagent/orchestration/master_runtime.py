@@ -14,14 +14,17 @@ CAS 原子推进真实 base，否则丢弃整个 Attempt 从 original_base 重�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, replace
 
 from codeagent.agent.models import FileState
 from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.evidence.models import EvidenceRef
-from codeagent.infra.cancellation import CancellationToken
+from codeagent.infra.cancellation import CancellationToken, CancelledByUser
 from codeagent.infra.ids import new_id
 from codeagent.infra.metrics import Metrics
+from codeagent.infra.trace import trace_scope, update_trace
+from codeagent.observability import TrajectoryExporter
 from codeagent.orchestration.global_verifier import GlobalVerifier, VerificationTarget
 from codeagent.orchestration.planner import Planner
 from codeagent.orchestration.run_store import (
@@ -37,7 +40,7 @@ from codeagent.orchestration.step_scheduler import SchedulerResult, StepSchedule
 from codeagent.runtime.agent_runtime import WorkerRun
 from codeagent.tool.approval import ApprovalPolicy, DenyExternalApprovalPolicy
 from codeagent.tool.command_policy import CommandDecision
-from codeagent.tool.deferred import DeferredAction
+from codeagent.tool.deferred import DeferredAction, DeferredRecord, DeferredState
 from codeagent.tool.effects import RetryPolicy
 from codeagent.tool.executor import CommandExecutor, LocalExecutor
 from codeagent.workspace.context import WorkspaceContext
@@ -66,6 +69,10 @@ class FinalResult:
     deferred_executed: int = 0
     deferred_failed: int = 0
     deferred_skipped: int = 0
+    deferred_unknown: int = 0
+    deferred_records: tuple[DeferredRecord, ...] = ()
+    trajectory_path: str | None = None
+    trajectory_error: str | None = None
 
 
 class MasterRuntime:
@@ -85,6 +92,8 @@ class MasterRuntime:
         approval_policy: ApprovalPolicy | None = None,
         command_executor: CommandExecutor | None = None,
         artifact_store: ArtifactStore | None = None,
+        trajectory_exporter: TrajectoryExporter | None = None,
+        trajectory_timeout_seconds: float = 10.0,
     ) -> None:
         self._planner = planner
         self._scheduler = scheduler
@@ -101,14 +110,42 @@ class MasterRuntime:
         self._approval = approval_policy or DenyExternalApprovalPolicy()
         self._executor = command_executor or LocalExecutor()
         self._artifacts = artifact_store
+        self._trajectory_exporter = trajectory_exporter
+        self._trajectory_timeout = trajectory_timeout_seconds
 
     async def run(
+        self, task: str, *, session_id: str, cancellation=None,
+        resume_master_run_id: str | None = None,
+    ) -> FinalResult:
+        master_run_id = resume_master_run_id or new_id("mrun")
+        path = error = None
+        with trace_scope(session_id=session_id, master_run_id=master_run_id,
+                         invocation_id=new_id("inv")):
+            try:
+                final = await self._run(
+                    task, session_id=session_id, cancellation=cancellation,
+                    resume_master_run_id=resume_master_run_id, master_run_id=master_run_id,
+                )
+            finally:
+                if self._trajectory_exporter is not None:
+                    try:
+                        async with asyncio.timeout(self._trajectory_timeout):
+                            path = str(await self._trajectory_exporter.export(
+                                master_run_id, session_snapshot=self._metrics.snapshot(),
+                            ))
+                    except Exception as exc:
+                        self._metrics.incr("observability.export_failures")
+                        error = type(exc).__name__
+        return replace(final, trajectory_path=path, trajectory_error=error)
+
+    async def _run(
         self,
         task: str,
         *,
         session_id: str,
         cancellation=None,
         resume_master_run_id: str | None = None,
+        master_run_id: str,
     ) -> FinalResult:
         self._metrics.incr("master.runs")
         git = self._wsm if isinstance(self._wsm, GitWorktreeWorkspaceManager) else None
@@ -121,14 +158,20 @@ class MasterRuntime:
             self._metrics.incr("master.resumes")
             recovered = await self._try_recover(record, git)
             if recovered is not None:
-                return recovered  # 已完成 / promote 幂等恢复完成，无需重跑
+                # Git 成果已完成，仍须恢复同一 Attempt 的外部动作。
+                attempt_no = record.last_attempt.attempt_no if record.last_attempt else 1
+                pending = await self._run_store.load_deferred(record.master_run_id, attempt_no)
+                records = await self._execute_deferred(
+                    pending, cancellation, master_run_id=record.master_run_id,
+                    attempt_no=attempt_no,
+                )
+                return _with_deferred(recovered, records)
             master_run_id, task, graph = record.master_run_id, record.task, record.graph
             await self._reclaim_orphans(record, git)
             # 关键：用**持久化的** original_base_sha，不用当前 HEAD（可能已被某次 promote 移动）。
             original_base = record.original_base_sha or (await git.base_revision() if git else None)
             attempt_offset = record.last_attempt.attempt_no if record.last_attempt else 0
         else:
-            master_run_id = new_id("mrun")
             graph = await self._planner.plan(task)
             original_base = await git.base_revision() if git else None
         await self._run_store.save_run(
@@ -138,7 +181,10 @@ class MasterRuntime:
 
         async def _checkpoint(step_id: str, worker: WorkerRun, integrated: bool) -> None:
             await self._run_store.record_step(
-                master_run_id, _to_outcome(step_id, worker, integrated)
+                master_run_id, replace(
+                    _to_outcome(step_id, worker, integrated), attempt_no=attempt_no,
+                    agent_run_id=worker.run.run_id,
+                )
             )
 
         current_task, attempts = task, 0
@@ -153,6 +199,7 @@ class MasterRuntime:
         while True:
             attempts += 1
             attempt_no = attempt_offset + attempts  # 恢复时接着已有 attempt_no，避免 PK 冲突
+            update_trace(attempt_no=attempt_no)
             candidate = (
                 await git.create_candidate(original_base)
                 if git and original_base is not None
@@ -180,6 +227,17 @@ class MasterRuntime:
 
             steps_ok = not result.failed and not result.blocked
             accept = verdict.accept and not verdict.indeterminate and steps_ok
+
+            if accept:
+                if candidate is not None:
+                    await self._update_attempt(
+                        master_run_id, attempt_no, AttemptState.VERIFIED, verdict=verdict.reason,
+                    )
+                # 清单必须先于 promote 持久化；失败直接中断，不能吞异常后继续合并。
+                await self._run_store.save_deferred(
+                    master_run_id, attempt_no,
+                    [a for w in result.workers.values() for a in w.run.deferred_actions],
+                )
 
             if accept and git and candidate_sha and original_base is not None:
                 # PROMOTING 必须在 git.promote 之前落库（带 candidate_sha）→ 崩溃恢复可幂等判定。
@@ -243,10 +301,13 @@ class MasterRuntime:
             master_run_id, "success" if integrated_ok else "failed", promoted_sha=promoted_sha
         )
         # A2：promote 成功后才执行被延后的外部动作（在真实 base workspace）；否则不执行。
-        ex = fa = sk = 0
+        records: tuple[DeferredRecord, ...] = ()
         if integrated_ok and deferred:
-            ex, fa, sk = await self._execute_deferred(deferred, cancellation)
-        return FinalResult(
+            records = await self._execute_deferred(
+                tuple(DeferredRecord(a) for a in deferred), cancellation,
+                master_run_id=master_run_id, attempt_no=attempt_no,
+            )
+        final = FinalResult(
             task=task,
             accepted=integrated_ok,
             reason=reason,
@@ -259,14 +320,13 @@ class MasterRuntime:
             replans=max(0, attempts - 1),
             integrated=integrated_ok,
             deferred_actions=tuple(deferred),
-            deferred_executed=ex,
-            deferred_failed=fa,
-            deferred_skipped=sk,
         )
+        return _with_deferred(final, records) if integrated_ok else final
 
     async def _execute_deferred(
-        self, deferred: list[DeferredAction], cancellation: CancellationToken | None
-    ) -> tuple[int, int, int]:
+        self, deferred: tuple[DeferredRecord, ...], cancellation: CancellationToken | None,
+        *, master_run_id: str, attempt_no: int,
+    ) -> tuple[DeferredRecord, ...]:
         """post-promote 逐条处理延后的外部动作：审批 → 在真实 base 执行。
 
         无 artifact_store（编程/测试装配未提供）时一律只上报不执行（skipped）。
@@ -274,23 +334,44 @@ class MasterRuntime:
         """
         git = self._wsm if isinstance(self._wsm, GitWorktreeWorkspaceManager) else None
         repo_root = git.repo_root if git else None
-        executed = failed = skipped = 0
+        records: list[DeferredRecord] = []
         seen: set[str] = set()
-        for action in deferred:
+        for record in deferred:
+            action = record.action
             if action.id in seen:  # 同一条动作只处理一次（幂等键）
                 continue
             seen.add(action.id)
+            limit = 2 if action.retry is RetryPolicy.IDEMPOTENT else 1
+            if record.state == DeferredState.RUNNING and (
+                action.retry is not RetryPolicy.IDEMPOTENT or record.attempts >= limit
+            ):
+                record = replace(record, state=DeferredState.UNKNOWN)
+                await self._run_store.update_deferred(master_run_id, attempt_no, record)
+            if record.state not in (DeferredState.PENDING, DeferredState.RUNNING):
+                records.append(record)
+                continue
+            if cancellation is not None:
+                cancellation.raise_if_cancelled()
             approved = await self._approval.approve(
                 _decision_of(action), command=action.command
             )
             if not approved or self._artifacts is None or repo_root is None:
-                skipped += 1
+                # 已开始的动作拒绝重试时，原执行结果仍然未知。
+                state = (DeferredState.UNKNOWN if record.state == DeferredState.RUNNING
+                         else DeferredState.SKIPPED)
+                record = replace(record, state=state)
+                await self._run_store.update_deferred(master_run_id, attempt_no, record)
+                records.append(record)
                 self._metrics.incr("master.deferred_skipped")
                 continue
-            attempts_left = 2 if action.retry is RetryPolicy.IDEMPOTENT else 1
             ok = False
-            while attempts_left > 0 and not ok:
-                attempts_left -= 1
+            while record.attempts < limit and not ok:
+                if cancellation is not None:
+                    cancellation.raise_if_cancelled()
+                record = replace(record, state=DeferredState.RUNNING, attempts=record.attempts + 1)
+                # 不吞持久化错误：必须先记账，才允许产生外部副作用。
+                await self._run_store.update_deferred(master_run_id, attempt_no, record)
+                uncertain = False
                 try:
                     outcome = await self._executor.run(
                         command=action.command,
@@ -301,15 +382,24 @@ class MasterRuntime:
                         metadata={"deferred": action.id},
                     )
                     ok = outcome.exit_code == 0
+                except CancelledByUser:
+                    raise
                 except Exception:
                     ok = False
+                    uncertain = True
+                state = (DeferredState.SUCCEEDED if ok else
+                         DeferredState.UNKNOWN if uncertain else DeferredState.FAILED)
+                if not ok and record.attempts < limit:
+                    state = DeferredState.RUNNING if uncertain else DeferredState.PENDING
+                # 结果落库失败则保留 RUNNING，恢复按结果未知处理。
+                record = replace(record, state=state)
+                await self._run_store.update_deferred(master_run_id, attempt_no, record)
             if ok:
-                executed += 1
                 self._metrics.incr("master.deferred_executed")
             else:
-                failed += 1
                 self._metrics.incr("master.deferred_failed")
-        return executed, failed, skipped
+            records.append(record)
+        return tuple(records)
 
     async def _try_recover(
         self, record: RunRecord, git: GitWorktreeWorkspaceManager | None
@@ -430,6 +520,7 @@ class MasterRuntime:
             )
         except Exception:
             self._metrics.incr("master.checkpoint_failures")
+            raise
 
     async def _update_attempt(
         self,
@@ -447,6 +538,7 @@ class MasterRuntime:
             )
         except Exception:
             self._metrics.incr("master.checkpoint_failures")
+            raise
 
     async def _discard_attempt(
         self, candidate: WorkspaceContext | None, result: SchedulerResult
@@ -462,6 +554,18 @@ class MasterRuntime:
                 await self._wsm.cleanup(candidate, keep=False)
             except Exception:
                 self._metrics.incr("master.cleanup_failures")
+
+
+def _with_deferred(final: FinalResult, records: tuple[DeferredRecord, ...]) -> FinalResult:
+    return replace(
+        final,
+        deferred_actions=tuple(r.action for r in records),
+        deferred_records=records,
+        deferred_executed=sum(r.state == DeferredState.SUCCEEDED for r in records),
+        deferred_failed=sum(r.state == DeferredState.FAILED for r in records),
+        deferred_skipped=sum(r.state == DeferredState.SKIPPED for r in records),
+        deferred_unknown=sum(r.state == DeferredState.UNKNOWN for r in records),
+    )
 
 
 def _decision_of(action: DeferredAction) -> CommandDecision:

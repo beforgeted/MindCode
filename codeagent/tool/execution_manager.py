@@ -219,6 +219,7 @@ class ToolExecutionManager:
                     "name": call.name,
                     "status": str(result.status),
                     "exit_code": result.exit_code,
+                    "duration_ms": run.duration_ms,
                     "artifact_uri": result.artifact_uri,
                     "truncated": result.truncated,
                     "content_preview": result.content[:2000],

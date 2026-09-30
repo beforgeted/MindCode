@@ -16,6 +16,7 @@ from codeagent.infra import metrics as M
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
 from codeagent.llm.message import ContextCategory, Message
+from codeagent.llm.observed_client import RoleLlmClient
 from codeagent.llm.types import ModelConfig
 
 
@@ -38,8 +39,8 @@ class ConversationHistoryCompactor:
         self._estimator = estimator
         self._partitioner = TurnIdPartitioner()
         self._chunker = HistoryChunker(estimator)
-        self._mapper = HistoryMapSummarizer(client, model_config)
-        self._reducer = TaskStateReducer(client, model_config)
+        self._mapper = HistoryMapSummarizer(RoleLlmClient(client, "compact_map"), model_config)
+        self._reducer = TaskStateReducer(RoleLlmClient(client, "compact_reduce"), model_config)
         self._metrics = metrics or Metrics()
 
     async def compact(

@@ -29,6 +29,7 @@ from codeagent.evidence.models import AgentEvent, EventType
 from codeagent.infra import metrics as M
 from codeagent.infra.metrics import Metrics
 from codeagent.infra.text import extract_test_counts
+from codeagent.infra.trace import trace_scope
 from codeagent.llm.client import LlmClient
 from codeagent.llm.message import Message, TextBlock, ToolResultBlock
 from codeagent.tool.execution_manager import ExecutionScope, ToolExecutionManager
@@ -55,6 +56,10 @@ class ReActEngine:
         self._metrics = metrics or Metrics()
 
     async def run_turn(self, run: AgentRun, user_input: str) -> AgentRunResult:
+        with trace_scope(session_id=run.session_id, agent_run_id=run.run_id, role="worker"):
+            return await self._run_turn(run, user_input)
+
+    async def _run_turn(self, run: AgentRun, user_input: str) -> AgentRunResult:
         run.status = RunStatus.RUNNING
         self._events.append_nowait(
             AgentEvent(

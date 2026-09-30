@@ -5,10 +5,14 @@ upsert 幂等）。恢复时重建 TaskGraph、**不重新 plan**，避免图漂
 
 **恢复语义（P8 Attempt 级幂等恢复）**：持久化 Attempt 状态机（CREATED→…→PROMOTING→PROMOTED
 /DISCARDED），`PROMOTING` 在调用 `git.promote` **之前**落库并带 `candidate_sha`。resume 时：
-run 已 success 或末尾 attempt 已 PROMOTED → 幂等返回；末尾 attempt 处于 `PROMOTING`（崩溃危险窗口）
+run 已 success 或末尾 attempt 已 PROMOTED → 不重推 Git，继续处理持久化外部动作；
+末尾 attempt 处于 `PROMOTING`（崩溃危险窗口）
 → 比对真实 base HEAD 与 candidate_sha/original_base_sha 决定"已成功不重推 / 安全重试 / BASE_STALE"；
 其它状态 → 回收孤儿 worktree/branch 后，从**持久化的** `original_base_sha`（非当前 HEAD）重开
 新 Attempt 重跑整张图。BASE_STALE 与语义 replan 走**独立预算**。step_outcome 仍作审计/可观测。
+
+外部动作清单在 promote 前落库，按 run / Attempt / 动作 ID 隔离。success 仅表示 Git 成果已接受，
+不代表外部动作全部成功；动作状态与累计尝试次数单独记录。仅支持单进程恢复（无跨进程锁）。
 
 设计：SQLite + WAL + `asyncio.to_thread`，风格对齐 memory/sqlite_store.py；默认 NullRunStore
 （no-op）：单测 / 不需要持久化时零成本。
@@ -20,15 +24,17 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from codeagent.agent.models import FileChangeKind, FileState
 from codeagent.evidence.models import EvidenceRef, EvidenceType
 from codeagent.orchestration.task_graph import Step, TaskGraph
+from codeagent.tool.deferred import DeferredAction, DeferredRecord, DeferredState
+from codeagent.tool.effects import EffectKind, RetryPolicy
 
 _T = TypeVar("_T")
 
@@ -71,6 +77,8 @@ class StepOutcome:
     evidence_refs: tuple[EvidenceRef, ...] = ()
     branch_name: str | None = None
     merged: bool = False
+    attempt_no: int = 0
+    agent_run_id: str | None = None
 
     @property
     def integrated(self) -> bool:
@@ -102,6 +110,20 @@ class RunRecord:
 
 @runtime_checkable
 class RunStore(Protocol):
+    async def load_observations(self, master_run_id: str) -> dict[str, list[dict[str, Any]]]: ...
+
+    async def save_deferred(
+        self, master_run_id: str, attempt_no: int, actions: list[DeferredAction]
+    ) -> None: ...
+
+    async def load_deferred(
+        self, master_run_id: str, attempt_no: int
+    ) -> tuple[DeferredRecord, ...]: ...
+
+    async def update_deferred(
+        self, master_run_id: str, attempt_no: int, record: DeferredRecord
+    ) -> None: ...
+
     async def save_run(
         self,
         *,
@@ -137,6 +159,24 @@ class RunStore(Protocol):
 
 
 class NullRunStore:
+    async def load_observations(self, master_run_id: str) -> dict[str, list[dict[str, Any]]]:
+        return {"transitions": [], "steps": []}
+
+    async def save_deferred(
+        self, master_run_id: str, attempt_no: int, actions: list[DeferredAction]
+    ) -> None:
+        pass
+
+    async def load_deferred(
+        self, master_run_id: str, attempt_no: int
+    ) -> tuple[DeferredRecord, ...]:
+        return ()
+
+    async def update_deferred(
+        self, master_run_id: str, attempt_no: int, record: DeferredRecord
+    ) -> None:
+        pass
+
     async def save_run(
         self,
         *,
@@ -261,6 +301,34 @@ class RunStoreError(RuntimeError):
 
 
 _SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS attempt_transition (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    master_run_id TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    candidate_sha TEXT,
+    verdict TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS transition_run ON attempt_transition(master_run_id, sequence);
+CREATE TABLE IF NOT EXISTS step_execution (
+    master_run_id TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL,
+    agent_run_id TEXT NOT NULL,
+    outcome_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (master_run_id, attempt_no, agent_run_id)
+);
+CREATE TABLE IF NOT EXISTS deferred_action (
+    master_run_id TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL,
+    action_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    action_json TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (master_run_id, attempt_no, action_id)
+);
 CREATE TABLE IF NOT EXISTS master_run (
     master_run_id TEXT PRIMARY KEY,
     session_id    TEXT NOT NULL,
@@ -311,6 +379,68 @@ class SqliteRunStore:
         self._path = Path(path)
         self._lock = asyncio.Lock()
         self._started = False
+
+    async def load_observations(self, master_run_id: str) -> dict[str, list[dict[str, Any]]]:
+        def op(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+            transitions = [dict(row) for row in conn.execute(
+                "SELECT * FROM attempt_transition WHERE master_run_id=? ORDER BY sequence",
+                (master_run_id,),
+            )]
+            steps = [{**json.loads(row["outcome_json"]), "updated_at": row["updated_at"]}
+                     for row in conn.execute(
+                         "SELECT * FROM step_execution WHERE master_run_id=? ORDER BY rowid",
+                         (master_run_id,),
+                     )]
+            return {"transitions": transitions, "steps": steps}
+        return await self._run(op)
+
+    async def save_deferred(
+        self, master_run_id: str, attempt_no: int, actions: list[DeferredAction]
+    ) -> None:
+        def op(conn: sqlite3.Connection) -> None:
+            for ordinal, action in enumerate(actions):
+                raw = json.dumps({
+                    "id": action.id, "command": action.command, "effect": action.effect,
+                    "retry": action.retry, "reason": action.reason, "cwd": action.cwd,
+                }, ensure_ascii=False)
+                conn.execute(
+                    """INSERT INTO deferred_action
+                       (master_run_id, attempt_no, action_id, ordinal, action_json)
+                       VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING""",
+                    (master_run_id, attempt_no, action.id, ordinal, raw),
+                )
+        await self._run(op)
+
+    async def load_deferred(
+        self, master_run_id: str, attempt_no: int
+    ) -> tuple[DeferredRecord, ...]:
+        def op(conn: sqlite3.Connection) -> tuple[DeferredRecord, ...]:
+            records = []
+            for row in conn.execute(
+                """SELECT * FROM deferred_action WHERE master_run_id=? AND attempt_no=?
+                   ORDER BY ordinal""", (master_run_id, attempt_no),
+            ):
+                data = json.loads(row["action_json"])
+                data["effect"] = EffectKind(data["effect"])
+                data["retry"] = RetryPolicy(data["retry"])
+                records.append(DeferredRecord(
+                    DeferredAction(**data), DeferredState(row["state"]), row["attempts"],
+                ))
+            return tuple(records)
+        return await self._run(op)
+
+    async def update_deferred(
+        self, master_run_id: str, attempt_no: int, record: DeferredRecord
+    ) -> None:
+        def op(conn: sqlite3.Connection) -> None:
+            cursor = conn.execute(
+                """UPDATE deferred_action SET state=?, attempts=?
+                   WHERE master_run_id=? AND attempt_no=? AND action_id=?""",
+                (record.state, record.attempts, master_run_id, attempt_no, record.action.id),
+            )
+            if cursor.rowcount != 1:
+                raise RunStoreError("外部动作未持久化，拒绝执行")
+        await self._run(op)
 
     async def start(self) -> None:
         async with self._lock:
@@ -428,6 +558,7 @@ class SqliteRunStore:
                     attempt.state, attempt.verdict, now,
                 ),
             )
+            _append_transition(conn, master_run_id, attempt.attempt_no, now)
 
         await self._run(op)
 
@@ -450,6 +581,7 @@ class SqliteRunStore:
                    WHERE master_run_id=? AND attempt_no=?""",
                 (state, now, candidate_sha, verdict, master_run_id, attempt_no),
             )
+            _append_transition(conn, master_run_id, attempt_no, now)
 
         await self._run(op)
 
@@ -457,6 +589,14 @@ class SqliteRunStore:
         now = datetime.now(UTC).isoformat()
 
         def op(conn: sqlite3.Connection) -> None:
+            if outcome.agent_run_id is not None:
+                conn.execute(
+                    """INSERT INTO step_execution VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(master_run_id, attempt_no, agent_run_id) DO UPDATE SET
+                       outcome_json=excluded.outcome_json, updated_at=excluded.updated_at""",
+                    (master_run_id, outcome.attempt_no, outcome.agent_run_id,
+                     json.dumps(asdict(outcome), ensure_ascii=False), now),
+                )
             conn.execute(
                 """INSERT INTO step_outcome(
                     master_run_id, step_id, status, summary, files_json,
@@ -542,6 +682,28 @@ class SqliteRunStore:
             )
 
         return await self._run(op)
+
+
+def _append_transition(
+    conn: sqlite3.Connection, master_run_id: str, attempt_no: int, now: str,
+) -> None:
+    row = conn.execute(
+        "SELECT state, candidate_sha, verdict FROM attempt WHERE master_run_id=? AND attempt_no=?",
+        (master_run_id, attempt_no),
+    ).fetchone()
+    if row is None:
+        raise RunStoreError("Attempt 不存在，无法记录状态转移")
+    previous = conn.execute(
+        """SELECT state FROM attempt_transition WHERE master_run_id=? AND attempt_no=?
+           ORDER BY sequence DESC LIMIT 1""", (master_run_id, attempt_no),
+    ).fetchone()
+    if previous is None or previous["state"] != row["state"]:
+        conn.execute(
+            """INSERT INTO attempt_transition
+               (master_run_id, attempt_no, state, candidate_sha, verdict, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (master_run_id, attempt_no, row["state"], row["candidate_sha"], row["verdict"], now),
+        )
 
 
 __all__ = [

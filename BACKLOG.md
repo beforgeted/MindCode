@@ -6,16 +6,14 @@
 
 ## A. 真安全/正确性缺口（优先）
 
-- [ ] **A1 生产侧 LLM token/成本计量接线** — effort: 小。
-  `AnthropicLlmClient` 用私有 `Metrics()`，`AgentSession` 另建一个 → REPL `/metrics`、真实会话的
-  token/成本**至今显示 0**。P9 只在 benchmark 观测层 rebind 打了补丁。正解：session 把 `self.metrics`
-  注入 client（改 `AgentSession` 构造 + `cli._build_client`）。**解锁 A10 校准与 D8 成本度量。**
-- [ ] **A2 post-promote 外部动作真正执行** — effort: 中。
-  P7e 只到"拦下 + 记 `DeferredAction` + 上报"。补：验收通过后经 `ApprovalPolicy` 逐条执行、标注不可
-  重试；想清楚"执行失败但 base 已 promote"如何如实告知。
-- [ ] **A3 REPL 交互审批接线** — effort: 小。
-  `InteractiveApprovalPolicy` 已写但没挂进活 REPL；单 Agent 会话也是 `allow_external_effects=False`，
-  交互下外部命令永远被拦/延后、不问用户。给 REPL 接交互审批 + 让单 Agent 会话可选放行 external。
+- [x] **A1 生产侧 LLM token 计量接线** — Session 指标已接通；O1 起由统一观测客户端记录
+  成功、失败、取消与缓存 token。金额成本的模型价格/缓存计费规则仍待补，不能将 token 当费用。
+- [x] **A2 post-promote 外部动作执行与恢复** — 合并前持久化动作清单，合并后逐条审批执行，
+  执行前后状态及尝试预算落入 RunStore；恢复跳过成功动作，只重试有剩余预算的幂等动作。
+  不可重试动作的中断结果记为 `unknown`，需人工核对；失败不回滚已合并代码。
+  边界：无外部 exactly-once 保证；跨进程并发恢复仍属 C6；旧 run 未保存的动作无法补回。
+- [x] **A3 REPL 交互审批接线** — REPL 已启用 `InteractiveApprovalPolicy`，单 Agent 外部命令
+  经用户审批；非交互默认拒绝。
 
 ## B. 沙箱与隔离（做真产品必经，重）
 
@@ -29,8 +27,8 @@
 
 - [ ] **C6 跨进程并发恢复** — effort: 中。
   P8 是单机崩溃重开；两个进程同时 resume 同一 run 未加 run 级锁。单机单进程使用可不做，标注即可。
-- [ ] **C7 Worker 候选抽取器默认接线** — effort: 小–中。
-  `AgentRuntime.candidate_harvester` 可注入但默认不注入 → Worker 产出的记忆候选目前不进共享 Memory 链路。
+- [x] **C7 Worker 候选抽取器默认接线** — `EventWorkerHarvester` 已默认接入，
+  仅成功 promote（非 Git 为 accept）的 Attempt 由 Supervisor 集中暂存候选。
 
 ## D. Benchmark 深化（质量度量）
 
@@ -51,6 +49,14 @@
 
 ## 建议排序
 
-先做 **A1**（便宜、且是 E10/D8 的前置——没有可信 token 数，校准和成本度量都是空的），顺带 **A3**
-让 P7 的审批能力在交互下真正可用。之后按需 **A2 → C7 → D8/D9**。B（沙箱）与 E（调参）留到有明确
-部署目标或真实会话数据时再动。
+**A1 / A3 / C7 / A2 已完成**。下一步按需推进 D8/D9 真实任务评估；模型路由与观测增强
+参见内部优化方案。B（沙箱）与 E（调参）按部署目标或真实会话数据推进；需要多个进程恢复同一
+run 前，必须先完成 C6。
+
+## 优化进度
+
+- [x] **O1 观测导出与归因** — 默认模型调用按角色/模型及 run/Attempt/Step/Worker 关联；
+  RunStore 同事务记录 Attempt 状态历史，保留分 Attempt 的 Step 执行结果。
+  `/trajectory <mrun_id>` 可重建报告，任务结束自动导出 JSON；支持跨 Session 恢复汇总。
+  边界：旧记录/未落盘日志不补造，金额成本暂缺定价，OTel 与日志索引后续按需接入。
+- [ ] **R1 模型路由** — 下一步先做角色配置与可控 fallback；金额预算路由需先补定价。

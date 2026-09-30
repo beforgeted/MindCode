@@ -22,8 +22,10 @@ from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.evidence.event_store import RawEventStore
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
+from codeagent.llm.observed_client import ObservedLlmClient, RoleLlmClient
 from codeagent.llm.types import ModelConfig
 from codeagent.memory.governance_repository import MemoryGovernanceRepository
+from codeagent.observability import JsonTrajectoryExporter
 from codeagent.orchestration.global_verifier import (
     GlobalVerifier,
     LlmGlobalVerifier,
@@ -33,7 +35,7 @@ from codeagent.orchestration.integration_coordinator import IntegrationCoordinat
 from codeagent.orchestration.integrator import InstructionIntegrator
 from codeagent.orchestration.master_runtime import FinalResult, MasterRuntime
 from codeagent.orchestration.planner import LlmPlanner, Planner
-from codeagent.orchestration.run_store import RunStore
+from codeagent.orchestration.run_store import RunStore, SqliteRunStore
 from codeagent.orchestration.shared_memory import (
     NullSupervisorMemoryWriter,
     SupervisorMemoryWriter,
@@ -66,6 +68,10 @@ async def build_master(
     artifact_store: ArtifactStore | None = None,
 ) -> MasterRuntime:
     """装配 MasterRuntime。stub LLM 下 Verifier 用确定性实现，真实模型下用 LLM 实现。"""
+    llm_client = ObservedLlmClient(llm_client, metrics=metrics, events=event_store, session_id="")
+    if run_store is None:
+        run_store = SqliteRunStore(config.state_root / "runs.db")
+        await run_store.start()
     model_config = ModelConfig(
         model=config.model, context_window=config.profile.context_window
     )
@@ -73,10 +79,14 @@ async def build_master(
     registry = AgentRegistry(default=definition)
     stub = config.use_stub_llm
     lverif = local_verifier or (
-        StatusLocalVerifier() if stub else LlmLocalVerifier(llm_client, model_config)
+        StatusLocalVerifier() if stub else LlmLocalVerifier(
+            RoleLlmClient(llm_client, "local_verifier"), model_config,
+        )
     )
     gverif = global_verifier or (
-        NoFailureVerifier() if stub else LlmGlobalVerifier(llm_client, model_config)
+        NoFailureVerifier() if stub else LlmGlobalVerifier(
+            RoleLlmClient(llm_client, "global_verifier"), model_config,
+        )
     )
     runtime = AgentRuntime(
         react_engine=engine,
@@ -107,7 +117,7 @@ async def build_master(
         else NullSupervisorMemoryWriter()
     )
     return MasterRuntime(
-        planner=planner or LlmPlanner(llm_client, model_config),
+        planner=planner or LlmPlanner(RoleLlmClient(llm_client, "planner"), model_config),
         scheduler=scheduler,
         global_verifier=gverif,
         workspace_manager=wsm,
@@ -123,6 +133,7 @@ async def build_master(
             else DenyExternalApprovalPolicy()
         ),
         artifact_store=artifact_store,
+        trajectory_exporter=JsonTrajectoryExporter(config.state_root, run_store, event_store),
     )
 
 
