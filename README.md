@@ -7,13 +7,43 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 + 工具执行安全 + Attempt 级幂等崩溃恢复 + 小规模质量 benchmark）。
 收尾接线 **A1 / A3 / C7 / A2** 已实现：会话计量、交互审批、Worker 记忆候选抽取与延后外部动作恢复。
 优化 **O1** 已实现：角色/模型调用归因、Attempt 状态历史与任务轨迹 JSON 导出。
-优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback；R1二期显式定价、持久化成本与Worker阈值降级也已实现。
+优化 **R1 一至三期** 已实现：角色模型配置与受控 fallback、显式定价与 Worker 成本阈值路由、
+显式模型能力目录，以及 Worker、Map/Reduce、Planner/Verifier 的请求预算适配。
+**E10 保守校准一期**已实现：按实际 Provider / 模型 / 请求协议隔离估算倍率，在窗口边界限频计数，
+覆盖实际备用模型请求，并将校准记录写入任务轨迹。
 **B4/B5 沙箱**已接入 Git / 非 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
 离线执行与受校验快照回传。B5 一期新增受控 HTTPS 文件下载，容器仍断网。C6 同 run 跨进程恢复互斥、
-非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **816 passed、1 skipped**，36 个真容器用例通过；Windows **658 passed、159 skipped**，两端 Ruff/Pyright 通过。
-真实 deepseek-flash 历史11场景和非Git任务正/负例通过是此前阶段的模型回归；本期恢复测试用Stub固定
-模型步骤，容器与进程强杀是真实操作，下载回归使用真实HTTPS。
-详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
+非 Git任务持久化恢复与staging崩溃回收也已完成。
+
+## 当前进度与下一阶段
+
+截至 **2026-10-03**，上述已验收改动已从 `feat/r1-validation` 快进合并并同步到 `main`，
+代码提交为 [`0335117`](https://github.com/beforgeted/MindCode/commit/0335117abf967fde916b87fc490fff3ac2428f05)。
+以下带日期的段落保留各阶段证据，当前进度以本节为准。
+
+| 最新完整验收 | 结果 | 说明 |
+|---|---|---|
+| Windows | **658 passed、159 skipped**；Ruff / Pyright 通过 | 本地测试结果单独记录 |
+| 独立 Ubuntu VM | **816 passed、1 skipped**；Ruff / Pyright 通过 | 含 **36 个真实 rootless Podman 用例**；专项用例包含在全量中，不另加总 |
+
+Linux 测试只在独立 Ubuntu 虚拟机 `mengx@192.168.100.128` 的独立验证目录运行，
+保留原仓库 `/home/mengx/MindCode` 和历史失败现场；**禁止使用 WSL Ubuntu 跑测试**。
+验收记录见 [LINUX_SANDBOX_ACCEPTANCE.md](LINUX_SANDBOX_ACCEPTANCE.md)。
+
+真实 deepseek-flash 历史 **11/11 场景**与非 Git 任务正/负例 **2/2**通过，是此前阶段的模型回归证据。
+最近的预算与校准验收使用固定 Provider 响应；容器、HTTPS 下载与进程强杀为真实操作。
+目前尚未通过新的付费模型对照实验验证质量、压缩次数或费用改善。E10 校准倍率只上调，
+属于保守预算保护，不能据此宣称节省 token 或保证所有请求都不超窗。
+
+**下一项：受控真实模型质量与费用对照评测。** 先补齐成对运行和报告记录，再在独立 VM 中进行有调用次数、
+时间与费用预算约束的小规模实验：固定任务、输入基线、Provider、模型和参数，比较关闭/开启校准的结果，
+重复运行以观察波动。记录 token 估算误差、计数调用、压缩次数、确定性产物验收、生成用量、费用和延迟；
+不支持精确计数或无法计价的项目明确标为不可用或未知。依据结果再调整校准倍率和压缩阈值（E11）。
+完整参数协商、通用任务特征路由、硬预算及 Phase 2/3 仍按后续计划推进。
+
+相关设计：[成本路由](R1_COST_ROUTING.md)、[模型能力](MODEL_CAPABILITIES.md)、
+[压缩窗口适配](COMPACTION_WINDOW_ADAPTATION.md)、[完整证据验收](VERIFICATION_INPUT_BUDGET.md)、
+[Token 校准](TOKEN_CALIBRATION.md)、[非 Git 恢复](NON_GIT_RECOVERY_DESIGN.md)。
 
 ## 快速开始
 
@@ -33,9 +63,12 @@ REPL 命令：`/context` `/compact` `/memory add|list|search|show|delete|harvest
 `/task <目标>` `/trajectory <mrun_id>` `/clear` `/metrics` `/quit`。`/task` 走事务化 Multi-Agent：规划 → 并行 Worker
 （各自 git worktree 隔离，集成进 candidate 而非真实 base）→ 依赖门控/过期重跑/Integrator 兜底
 自愈冲突 → **产物级全局验收** → 通过才 **CAS 原子推进真实 base**，否则整个 Attempt 丢弃、从
-起点重开（用户只看到"任务完成/未完成"，不接触 git 冲突）。非 git 环境回退只读并行+写串行。
+起点重开（用户只看到"任务完成/未完成"，不接触 git 冲突）。非 Git 沙箱任务使用快照候选与隔离 Worker，
+独立验收通过后发布文件差异，不创建 Git 仓库；含写入的任务必须配置确定性验收命令。
 `/task --resume <mrun_id>` 恢复：Attempt 级幂等恢复——已 promote 的识别为完成不重推，
 PROMOTING 崩溃窗口按真实 base HEAD 判定，其余状态回收孤儿后从持久 original_base 重开（P8）。
+默认 SQLite 装配下，非 Git 沙箱任务通过持久快照与发布回执恢复，规则见
+[NON_GIT_RECOVERY_DESIGN.md](NON_GIT_RECOVERY_DESIGN.md)。
 代码合并后，resume 还会处理原 Attempt 中未完成的外部动作，恢复规则见下文。
 可选 `CODEAGENT_VERIFY_CMD` 指定确定性验收命令，在独立 validation worktree 运行。
 
@@ -64,7 +97,7 @@ pyright             # 类型
 
 | 能力 | 位置 |
 |---|---|
-| 唯一 TokenEstimator（启发式 + 精确计数校准） | `context/token_estimator.py` |
+| TokenEstimator（启发式 + 按模型隔离的保守校准与边界采样） | `context/token_estimator.py`；[校准设计](TOKEN_CALIBRATION.md) |
 | 全配置化阈值（soft/hard/target + 预测加项） | `context/profile.py` |
 | 预测式压缩触发 | `context/budget.py` |
 | ContextManager 统一入口 | `context/manager.py` |
@@ -86,10 +119,10 @@ pyright             # 类型
 | P4 本地去重 + 冲突消解（supersede/版本化） | `memory/dedup.py`、`memory/conflict.py`、`memory/sqlite_store.py` |
 | P4 治理编排（Session End / `/memory harvest`） | `memory/governance_service.py`、`session.py` |
 | P4 检索重排（§29 来源优先级）+ Progressive Disclosure | `memory/retriever.py`、`tool/builtin/memory_get.py`、`tool/builtin/evidence_get.py` |
-| P5 TaskGraph + Planner（LLM/Static，保守失败退化单 Step） | `orchestration/task_graph.py`、`orchestration/planner.py` |
-| P5 AgentRuntime（reflection）+ LocalVerifier | `runtime/agent_runtime.py`、`runtime/local_verifier.py` |
+| P5 TaskGraph + Planner（LLM/Static，完整任务预算、JSON 修复与普通失败退化） | `orchestration/task_graph.py`、`orchestration/planner.py` |
+| P5 AgentRuntime（reflection）+ LocalVerifier（无法判定时停止并阻止变更回传） | `runtime/agent_runtime.py`、`runtime/local_verifier.py` |
 | P5 StepScheduler（pending-set 增量派发，非 barrier） | `orchestration/step_scheduler.py` |
-| P5 Workspace 隔离（git worktree / 非 git 回退） | `workspace/manager.py`、`workspace/git_worktree.py` |
+| P5 Workspace 隔离（Git worktree / 非 Git 沙箱快照候选） | `workspace/manager.py`、`workspace/git_worktree.py`；[快照与恢复设计](NON_GIT_RECOVERY_DESIGN.md) |
 | P5 MasterRuntime（plan→schedule→verify→replan→merge→cleanup） | `orchestration/master_runtime.py`、`orchestration/master_session.py` |
 | P5+ 事务化集成：依赖门控（integrated 才解锁后继） | `orchestration/step_scheduler.py`、`orchestration/integration_coordinator.py` |
 | P5+ 乐观并发：base_revision + 读/写集重叠检测 → 过期即最新基线重跑 | `orchestration/integration_coordinator.py`、`workspace/git_worktree.py` |
@@ -112,7 +145,8 @@ pyright             # 类型
 | A2：审批后的外部动作执行、持久化与恢复 | `orchestration/run_store.py`、`orchestration/master_runtime.py` |
 | O1：调用归因、状态时间线、可重建轨迹导出 | `llm/observed_client.py`、`infra/trace.py`、`observability.py` |
 | R1：角色模型路由、显式备用模型链与错误分类 | `llm/routing.py`、`llm/client.py`、`config.py` |
-| B4/B5 第一期：Podman Worker、文件工具、命令和独立验收接线 | `execution/`、`runtime/worker_sandbox.py`、`tool/sandbox.py` |
+| R1 二、三期：成本阈值路由、模型能力与各角色请求预算 | [成本路由](R1_COST_ROUTING.md)、[模型能力](MODEL_CAPABILITIES.md)、[验收预算](VERIFICATION_INPUT_BUDGET.md) |
+| B4/B5 第一期：Podman 普通交互、Worker、文件工具、命令和独立验收接线 | `execution/`、`runtime/worker_sandbox.py`、`tool/sandbox.py` |
 
 ## 角色模型与备用链（R1 第一期）
 
@@ -129,8 +163,9 @@ $env:CODEAGENT_MODEL_WORKER = "worker-model"
 $env:CODEAGENT_MODEL_FALLBACK_PLANNER = "backup-model-a;backup-model-b"
 ```
 
-- `CODEAGENT_MODEL_<ROLE>` 覆盖该角色的模型名称，保留调用方的温度、输出上限、上下文窗口等参数。
-  未配置的角色保留传入的 `ModelConfig`；压缩 Map/Reduce 的单次输出预算仍有效。
+- `CODEAGENT_MODEL_<ROLE>` 覆盖该角色的模型名称；未配置的角色保留传入的 `ModelConfig`。
+  启用能力目录后，按实际候选模型收紧窗口与输出上限，保留调用方更小的限制；不支持温度参数时省略该参数。
+  各角色仍执行完整请求预算检查，配置见 [MODEL_CAPABILITIES.md](MODEL_CAPABILITIES.md)。
 - `CODEAGENT_MODEL_FALLBACK` 是所有已识别角色的默认备用链；
   `CODEAGENT_MODEL_FALLBACK_<ROLE>` 覆盖它。角色备用链显式设为空字符串可禁用全局备用链
   （编程配置可使用 `fallbacks={"global_verifier": ()}`）。最多 3 个备用名称，规范化后去重。
@@ -348,7 +383,7 @@ MindCode 写入使用 flock 串行化，并在输入与写回前后复查工作�
 
 2026-10-02 非 Git `/task` 追加验收：独立 Ubuntu VM **475 passed、1 skipped**，18 个真容器用例通过；
 Windows **357 passed、119 skipped**，Ruff / Pyright 通过。真实 REPL 的 `/task` → 普通读取 → /clear → 退出
-通过，容器清单为空。先提交共享交互阶段 `890bae7`，本节新实现尚未提交；未使用 WSL 测试。
+通过，容器清单为空。共享交互阶段已提交 `890bae7`，本节非 Git `/task` 已提交 `6ae0341`，均已合入 `main`；未使用 WSL 测试。
 
 非 Git `/task` 使用数据快照候选，Worker 各自隔离；成功冻结/销毁容器后只向私有候选集成差异。
 前驱集成后才解锁后继；并行兄弟发现读写重叠，或 shell/搜索读集未知且候选已变时，丢弃旧输出再重跑。
@@ -386,7 +421,7 @@ applied文件日志先保留，SQL FULL同步记账后退休，恢复不重复�
 设计与边界见 [NON_GIT_RECOVERY_DESIGN.md](NON_GIT_RECOVERY_DESIGN.md)。
 
 以上阶段已提交92c88d1；R1成本阈值路由见末节。B5通用联网及Phase2/3仍待推进。
-带日期的旧段落保留当时证据，当前状态以本节和开头进度为准。
+带日期的旧段落保留当时证据，当前状态以开头“当前进度与下一阶段”为准。
 
 
 ### R1二期：显式定价与Worker成本阈值路由（2026-10-02）
@@ -416,10 +451,11 @@ CODEAGENT_MODEL_ECONOMY_WORKER成对启用Worker阈值降级，默认不配置�
 CODEAGENT_MODEL_CAPABILITIES指定独立能力目录；精确provider:model声明窗口、输出、工具、图片和temperature。
 启用后缺当前候选条目/价格能力冲突拒绝；不兼容主模型明确失败，不兼容备用跳过，经济模型不适用保留主模型。
 仅限流/超时/暂时不可用继续显式fallback。候选保留操作者较小窗口/输出限制；不支持temperature时省略参数。
-Worker准备预算扣除输出和工具声明，进入现有ContextManager；所有角色chat经过能力门禁，但自动重分压缩chunk/长输入仍待做。
+Worker准备预算扣除输出和工具声明，进入现有ContextManager；所有角色chat经过能力门禁。
+本阶段尚未处理压缩chunk与其他角色长输入，后续已在以下两节补齐。
 trajectory增加capability_routes；事件故障不改变能力决策，未启用目录兼容旧行为。
 模型能力是显式元数据和启发式检查，没有精确token保证、完整参数协商或硬预算；设计见[MODEL_CAPABILITIES.md](MODEL_CAPABILITIES.md)。
-R1二期已提交dbae3a7，模型能力适配已提交9451e8e；下一项可继续压缩Map/Reduce窗口与chunk适配。
+R1二期已提交dbae3a7，模型能力适配已提交9451e8e，均已合入main；后续Map/Reduce和Planner/Verifier适配见以下两节。
 
 
 ### R1三期第二部分：Map/Reduce窗口与请求规划（2026-10-03）
@@ -431,8 +467,8 @@ CODEAGENT_COMPACTION_REDUCE_MAX_BATCHES默认32，正常和应急Reduce共享；
 失败、截断、膨胀、超时或预算耗尽不发布中间结果，原Map并发与取消排空规则保留。
 LLM trace新增compaction_id与chunk/批号/版本，既有trajectory可查看。
 生产字节与全量快照一致；唯一测试类型标注修正后两端重查31项及静态，修正前证据保留。
-设计见[COMPACTION_WINDOW_ADAPTATION.md](COMPACTION_WINDOW_ADAPTATION.md)。上一阶段已提交9451e8e，本期压缩适配已验收并随本次提交归档。
-后续Planner/Verifier长输入规划、精确计数校准、完整参数协商及真实质量/费用评测待做。
+设计见[COMPACTION_WINDOW_ADAPTATION.md](COMPACTION_WINDOW_ADAPTATION.md)。上一阶段已提交9451e8e，本期压缩适配已提交c56ebfa并合入main。
+后续Planner/Verifier长输入规划与E10保守计数校准已完成；完整参数协商及真实质量/费用对照评测仍待推进。
 
 
 ### R1三期第三部分：Planner/Verifier长输入与完整证据（2026-10-03）
@@ -446,8 +482,8 @@ Planner按有效角色模型预算完整请求，任务超限明确停止；原�
 默认CODEAGENT_VERIFICATION_MAX_BATCHES=32、CODEAGENT_VERIFICATION_TIMEOUT_SECONDS=120、CODEAGENT_VERIFICATION_MAX_EVIDENCE_BYTES=8388608。
 全局语义阶段超时不等于整个采集/任务总截止时间；批次也不是账单硬上限。
 首轮VM全量发现二进制一律拒绝挡住下载SHA256验收，日志和现场保留；修正后全量774/1通过，再补路径字面量与规划取消边界，最终新目录完整复验。
-设计见[VERIFICATION_INPUT_BUDGET.md](VERIFICATION_INPUT_BUDGET.md)。上一阶段c56ebfa，本期已验收并随本次提交归档。
-模型判定使用固定Provider，没有新增付费模型质量/费用评测；后续精确计数校准、完整能力、任务特征、硬预算与真实模型评测待做。
+设计见[VERIFICATION_INPUT_BUDGET.md](VERIFICATION_INPUT_BUDGET.md)。上一阶段c56ebfa，本期已提交340b0f1并合入main。
+模型判定使用固定Provider，没有新增付费模型质量/费用评测；E10保守校准已完成，完整能力协商、任务特征、硬预算与真实模型评测仍待推进。
 
 
 ### E10：按模型校准与边界计数（2026-10-03）
@@ -459,5 +495,5 @@ Worker在裁剪后、压缩决策前限频采样，各角色的完整请求预�
 并发等待正在执行的同类别采样后重查预算；取消向上传播，不支持/无效/失败保留原估算或已有倍率。
 轨迹JSON新增token_calibrations，不混入生成用量或据此推断计数费用为零。
 本期倍率只上调，不证明所有输入不超窗，也未证明减少压缩或费用；没有新增付费模型实验。
-设计见[TOKEN_CALIBRATION.md](TOKEN_CALIBRATION.md)。上一阶段已提交340b0f1，本期已验收并随本次提交归档。
+设计见[TOKEN_CALIBRATION.md](TOKEN_CALIBRATION.md)。上一阶段已提交340b0f1，本期已提交0335117并合入main。
 后续优先做受控真实模型质量/费用对照，再据证据调整倍率和压缩阈值；完整任务特征、硬预算与Phase2/3继续按原计划推进。
