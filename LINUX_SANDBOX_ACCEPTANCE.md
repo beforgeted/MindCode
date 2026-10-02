@@ -1,6 +1,6 @@
 # Linux Podman 分环境验收记录
 
-2026-10-02 当前最终版本：独立 Ubuntu VM **454 passed、1 skipped**，14 个真容器用例与两类共享目录 REPL 冒烟通过；Ruff / Pyright 通过，容器清单为空。
+2026-10-02 当前最终版本：独立 Ubuntu VM **475 passed、1 skipped**，18 个真容器用例通过；另完成真实模型历史11/11与非Git2/2复验；Ruff / Pyright 通过，容器清单为空。
 
 以下先保留此前 WSL2 一期结果，独立 VM 追加实现与证据见文末。
 
@@ -184,3 +184,94 @@ vm-exit-codes.json、source-manifest.json、vm-cli-smoke.json、vm-cli-dirty-git
 内核/Podman/受信镜像信息与acceptance-summary.json。代码和测试哈希与最终源码一致，后续文档不属于清单。
 复现：SSH进入最终VM目录，设置 MINDCODE_PODMAN_TEST_IMAGE 为上述完整镜像ID，用 .venv/bin/python
 执行 pytest -q、ruff check . 和 pyright --pythonpath "$PWD/.venv/bin/python"。本轮新改动尚未提交。
+
+
+## 2026-10-02 追加：非 Git /task 的候选事务
+
+先提交共享交互阶段890bae7，再实现本节。VM mengx@192.168.100.128，内核6.8.0-142-generic，
+最终源码在 `/home/mengx/mindcode-nongit-final.PMwLn7`，184文件SHA256逐一核对。运行时、受信镜像与
+依赖复用现有资源，没有安装或拉取；原仓库、历史失败现场及各轮新验证目录保留。未使用WSL。
+
+最终VM全量 **475 passed / 1 skipped**（313.682秒），静态检查通过；18个真容器用例通过。
+Windows357 / 119，Ruff/Pyright通过。专项40项纳入全量，不与全量相加。真实REPL `/task`写42、普通send
+读实际成果、clear、退出通过，RunStore记录success/promoted与snapshot内容摘要，未创建.git，用户seed/env保留。
+全量前后与REPL结束容器清单均为空；用Stub固定模型输出，历史真实模型套件本轮未重跑。
+
+新增四个真实Podman用例：非Git两步DAG候选接受/拒绝、全局先拒绝再重跑的追加不重复、执行中取消排空
+Worker容器。单元覆盖缺验收、封存失败、Worker异常、验收销毁失败、用户并发编辑、只读无需验收、
+并行读写重叠/未知读/不相交集成、resume拒绝且旧记录不变、发布未知、取消状态与整份快照及时释放。
+
+机制：普通文件夹捕获原始有界数据；每Attempt候选、每Worker私有副本；Step集成只改候选。内容摘要冻结后
+在独立验收容器检查真实候选，全局门禁接受才用已有日志回写项目。拒绝Attempt重新从原快照开始。
+进程取消先取消并await所有正在运行的Worker，再释放私有目录；已集成Worker及时删除目录并释放无引用快照。
+源.env/控制面/常见根虚拟环境与缓存不导入；输出过滤发生在候选集成和独立验收前。
+
+边界：snapshot修订与内部引用不是Git对象，不创建Git仓库。非Git任务候选未跨进程持久化，当前明确拒绝
+resume并保留旧记录，不用内容相同推断本任务已发布；需要持久化候选和发布回执才能进一步实现。
+资源账本回收容器，publication修复文件写回，RunStore记录编排；磁盘staging无跨进程自动回收，C6互斥待做。
+逐文件共享发布不提供针对外部编辑器的全局原子CAS；真实冲突/决定未知保留日志供人工核对。
+
+保留首轮单位失败：`/home/mengx/mindcode-nongit-task.9OYfPw/first-failed-unit`，FileState字段名误用与
+重载TaskGraph对象按身份比较导致测试失败，类型检查还发现Verifier签名；修正断言与测试协议后39项通过。
+该目录首轮全量474 / 1、18真容器通过；最终另补释放测试、取消记录与准确CLI提示后全量475 / 1。
+各轮数字不相加，最终以final目录为准。证据 `.codeagent/validation/vm-nongit-task/` 下full/unit XML与log、
+静态检查、退出码、源码manifest、环境/镜像、容器清单、CLI-smoke和acceptance-summary。
+
+复现：SSH进入final目录，设置MINDCODE_PODMAN_TEST_IMAGE为前述完整镜像ID，执行.venv/bin/python
+的pytest -q、ruff check .、pyright --pythonpath "$PWD/.venv/bin/python"。本节新改动未提交。
+
+
+## 2026-10-02 追加：真实模型复验与提交前检查
+
+本节在独立 Ubuntu VM `mengx@192.168.100.128` 的
+`/home/mengx/mindcode-real-revalidation.XACDvV` 执行，全程未调用 WSL。184 个源码/测试文件
+SHA256 校验通过；原仓库仍为 5083609，已有凭据文件与历史 012 的失败产物哈希未变。
+历史 10 PASS / 1 FAIL 的报告和 note.txt 保留，不用新结果覆盖旧结论。
+
+真实模型为 VM 已配置的 **deepseek-flash**，强制 `execution_backend=podman`，禁止用 Stub 成绩
+代替复验。沿用历史 11 个场景的 DAG、任务目标与产物判据，各跑一次，**11/11 PASS**；默认增加独立
+容器 `python -m compileall -q .` 检查，verify_fail/verify_pass 保留原有 false/grep 验收命令。
+固定 DAG 的场景仅固定规划，Worker 与本地/全局验证仍调用真实模型；三个自由规划场景使用真实 Planner。
+
+| 场景 | 结果 | 尝试 | stale / 重跑 / Integrator |
+|---|---|---:|---|
+| `dep_chain` | PASS | 1 | 0 / 0 / 0 |
+| `overlap_append` | PASS | 1 | 1 / 1 / 0 |
+| `strong_conflict` | PASS | 1 | 1 / 0 / 1 |
+| `verify_fail` | PASS | 2 | 0 / 0 / 0 |
+| `simple_create` | PASS | 1 | 0 / 0 / 0 |
+| `planner_freeform` | PASS | 1 | 0 / 0 / 0 |
+| `deep_chain` | PASS | 1 | 0 / 0 / 0 |
+| `wide_fanout` | PASS | 1 | 3 / 3 / 0 |
+| `verify_pass` | PASS | 1 | 0 / 0 / 0 |
+| `planner_trap` | PASS | 1 | 0 / 0 / 0 |
+| `split_utils_e2e` | PASS | 2 | 1 / 1 / 0 |
+
+
+关键负例 verify_fail：两次 Attempt 均有真实 Worker 完成并进入候选，而独立 false 验收拒绝；
+integrated=False、base_moved=False，项目没有 note.txt。不能仅凭“没有产物”把调用失败当成正确拒绝。
+这次模型轨迹与旧轨迹不同；对旧越界命令的确定性重现仍由 reject_escape 真容器测试覆盖，
+本次 PASS 不替代权限、实际内核约束与跨进程回收证据。
+
+额外非 Git 真实模型 **2/2 PASS**：两步依赖链通过后 version.txt=7；同会话普通交互再读取并写
+receipt.txt=received-7；负例有完成的候选但 false 验收拒绝，两次 Attempt 后 lib.py/version.txt 均未发布。
+两个目录均不创建 .git，用户哨兵 .env 与原文件保留。人工哨兵用于测试，不复制真实凭据到执行域。
+
+验收镜像从既有固定 Python 3.12-slim ID 构建，pytest=9.1.1、packaging=26.3、pluggy=1.6.0、
+iniconfig=2.3.0、Pygments=2.21.0；wheel 经 TLS 从 PyPI 获取后记录内容哈希，构建安装断网。
+本轮实际固定镜像 ID：`0f8a779567c977206c4e1a3985a37fa46cf25d93d767ed93dd866c8670c140a5`。模型 API 仅在可信控制进程调用；Worker 和验收容器保持断网、
+无宿主 bind mount，凭据不导入。镜像制作不是扩大运行时网络权限。
+
+随后使用该镜像重新执行 VM 全量：**475 passed / 1 skipped**，18 个真容器用例全部通过，
+Ruff/Pyright通过；Windows重新回归 **357 passed / 119 skipped**，Ruff/Pyright通过。
+真实套件与全量前后容器清单均为空，记录到 58 个实际执行域。各类通过数不相加。
+普通 pytest 继续不触发真实模型请求；单次项目内套件不能证明模型普遍质量提升或 SWE-bench 表现。
+
+证据 `.codeagent/validation/vm-real-revalidation/`：suite-report.json、nongit-real-report.json、
+real-summary.json、real-suite.log、configuration.json、execution-domains.json、evidence-audit.json、
+verify-fail-events.json、ordinary-read-audit.json、source-manifest.json、image-inspect.json、image-id.txt、固定依赖/构建与下载日志、
+VM全量XML/log、静态检查、退出码及容器清单。完整场景目录和控制面日志留在上述VM目录。
+本节文档更新晚于源码打包；源码/测试哈希对应被验收版本，历史阶段记录保持原样。
+
+当前非Git/task提交门槛通过。下一项按实际需求推进B5网络策略；非Git候选持久化/发布回执、磁盘staging
+崩溃回收与C6同run恢复锁仍未实现，Phase1动态预算路由、Phase2/3专项未完成。

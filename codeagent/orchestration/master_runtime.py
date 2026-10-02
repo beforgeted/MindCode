@@ -22,6 +22,7 @@ from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.evidence.models import EvidenceRef
 from codeagent.execution.models import ExecutionPurpose
 from codeagent.execution.podman import PodmanSandboxManager
+from codeagent.execution.publication import PublicationUncertain
 from codeagent.execution.workspace import capture_workspace
 from codeagent.infra.cancellation import CancellationToken, CancelledByUser
 from codeagent.infra.ids import new_id
@@ -49,6 +50,7 @@ from codeagent.tool.executor import CommandExecutor, LocalExecutor
 from codeagent.workspace.context import WorkspaceContext
 from codeagent.workspace.git_worktree import GitWorktreeWorkspaceManager
 from codeagent.workspace.manager import WorkspaceManager
+from codeagent.workspace.snapshot import SnapshotWorkspaceManager
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,15 +125,44 @@ class MasterRuntime:
         resume_master_run_id: str | None = None,
     ) -> FinalResult:
         master_run_id = resume_master_run_id or new_id("mrun")
+        if isinstance(self._wsm, SnapshotWorkspaceManager) and resume_master_run_id is not None:
+            return FinalResult(
+                task=task, accepted=False, integrated=False, master_run_id=master_run_id,
+                reason="非Git沙箱任务暂不支持resume；请核对实际成果后启动新任务",
+            )
         path = error = None
+        owns_snapshot = False
         with trace_scope(session_id=session_id, master_run_id=master_run_id,
                          invocation_id=new_id("inv")):
             try:
+                snapshot = self._wsm if isinstance(self._wsm, SnapshotWorkspaceManager) else None
+                if snapshot is not None:
+                    snapshot.begin()
+                    owns_snapshot = True
                 final = await self._run(
                     task, session_id=session_id, cancellation=cancellation,
                     resume_master_run_id=resume_master_run_id, master_run_id=master_run_id,
                 )
+            except asyncio.CancelledError:
+                if isinstance(self._wsm, SnapshotWorkspaceManager) and owns_snapshot:
+                    await self._run_store.update_run_status(master_run_id, "cancelled")
+                raise
+            except Exception as exc:
+                if not isinstance(self._wsm, SnapshotWorkspaceManager):
+                    raise
+                uncertain = isinstance(exc, PublicationUncertain) or self._wsm.published
+                await self._run_store.update_run_status(
+                    master_run_id, "unknown" if uncertain else
+                    "cancelled" if isinstance(exc, CancelledByUser) else "failed",
+                )
+                final = FinalResult(
+                    task=task, accepted=False, integrated=False, master_run_id=master_run_id,
+                    reason=("写回结果待核对；不能认为全部成功或全部回滚。" if uncertain else "")
+                    + f"{type(exc).__name__}: {exc}",
+                )
             finally:
+                if owns_snapshot and isinstance(self._wsm, SnapshotWorkspaceManager):
+                    self._wsm.end()
                 if self._trajectory_exporter is not None:
                     try:
                         async with asyncio.timeout(self._trajectory_timeout):
@@ -147,6 +178,10 @@ class MasterRuntime:
         if self._sandbox is not None:
             await self._sandbox.aclose()
 
+    @property
+    def supports_resume(self) -> bool:
+        return not isinstance(self._wsm, SnapshotWorkspaceManager)
+
     async def _run(
         self,
         task: str,
@@ -157,7 +192,9 @@ class MasterRuntime:
         master_run_id: str,
     ) -> FinalResult:
         self._metrics.incr("master.runs")
-        git = self._wsm if isinstance(self._wsm, GitWorktreeWorkspaceManager) else None
+        git = self._wsm if isinstance(
+            self._wsm, (GitWorktreeWorkspaceManager, SnapshotWorkspaceManager),
+        ) else None
 
         attempt_offset = 0
         if resume_master_run_id is not None:
@@ -165,7 +202,8 @@ class MasterRuntime:
             if record is None:
                 raise ValueError(f"找不到可恢复的 master run: {resume_master_run_id}")
             self._metrics.incr("master.resumes")
-            recovered = await self._try_recover(record, git)
+            recovery_git = git if isinstance(git, GitWorktreeWorkspaceManager) else None
+            recovered = await self._try_recover(record, recovery_git)
             if recovered is not None:
                 # Git 成果已完成，仍须恢复同一 Attempt 的外部动作。
                 attempt_no = record.last_attempt.attempt_no if record.last_attempt else 1
@@ -176,7 +214,7 @@ class MasterRuntime:
                 )
                 return _with_deferred(recovered, records)
             master_run_id, task, graph = record.master_run_id, record.task, record.graph
-            await self._reclaim_orphans(record, git)
+            await self._reclaim_orphans(record, recovery_git)
             # 关键：用**持久化的** original_base_sha，不用当前 HEAD（可能已被某次 promote 移动）。
             original_base = record.original_base_sha or (await git.base_revision() if git else None)
             attempt_offset = record.last_attempt.attempt_no if record.last_attempt else 0
@@ -206,6 +244,8 @@ class MasterRuntime:
         reason = ""
 
         while True:
+            if isinstance(git, SnapshotWorkspaceManager) and cancellation is not None:
+                cancellation.raise_if_cancelled()
             attempts += 1
             attempt_no = attempt_offset + attempts  # 恢复时接着已有 attempt_no，避免 PK 冲突
             update_trace(attempt_no=attempt_no)
@@ -229,7 +269,9 @@ class MasterRuntime:
                     master_run_id, attempt_no, AttemptState.CANDIDATE_FROZEN,
                     candidate_sha=candidate_sha,
                 )
-            target = await self._build_target(git, original_base, candidate_sha)
+            target = await self._build_target(
+                git, original_base, candidate_sha, cancellation=cancellation,
+            )
             if candidate is not None:
                 await self._update_attempt(master_run_id, attempt_no, AttemptState.VERIFYING)
             verdict = await self._verifier.verify(current_task, graph, result, target)
@@ -254,6 +296,8 @@ class MasterRuntime:
                 await self._update_attempt(
                     master_run_id, attempt_no, AttemptState.PROMOTING, candidate_sha=candidate_sha
                 )
+                if isinstance(git, SnapshotWorkspaceManager) and cancellation is not None:
+                    cancellation.raise_if_cancelled()
                 promoted = await git.promote(candidate_sha, expected_base=original_base)
                 await self._discard_attempt(candidate, result)
                 if promoted:
@@ -306,6 +350,8 @@ class MasterRuntime:
             files.extend(worker.result.files)
             evidence.extend(worker.result.evidence_refs)
             deferred.extend(worker.run.deferred_actions)
+        if isinstance(git, SnapshotWorkspaceManager):
+            files = list(git.published_files()) if integrated_ok else []
 
         await self._run_store.update_run_status(
             master_run_id, "success" if integrated_ok else "failed", promoted_sha=promoted_sha
@@ -323,7 +369,8 @@ class MasterRuntime:
             reason=reason,
             master_run_id=master_run_id,
             scheduler=result,
-            files=tuple(files),
+            files=tuple(files) if not isinstance(git, SnapshotWorkspaceManager)
+            or integrated_ok else (),
             evidence_refs=tuple(evidence),
             merged_branches=tuple(result.integrated_branches),
             merge_conflicts=tuple(result.conflicts),
@@ -484,9 +531,10 @@ class MasterRuntime:
 
     async def _build_target(
         self,
-        git: GitWorktreeWorkspaceManager | None,
+        git: GitWorktreeWorkspaceManager | SnapshotWorkspaceManager | None,
         original_base: str | None,
         candidate_sha: str | None,
+        *, cancellation: CancellationToken | None = None,
     ) -> VerificationTarget | None:
         if git is None or original_base is None or candidate_sha is None:
             return None
@@ -494,10 +542,15 @@ class MasterRuntime:
         diff = await git.diff_text(original_base, candidate_sha)
         det_ok: bool | None = None
         det_detail = ""
+        if isinstance(git, SnapshotWorkspaceManager) and changed and not self._verify_command:
+            det_ok = False
+            det_detail = "非Git任务包含改动但未配置 CODEAGENT_VERIFY_CMD"
         if self._verify_command:
             val = await git.create_validation(candidate_sha)
             try:
                 if self._sandbox is None:
+                    if not isinstance(git, GitWorktreeWorkspaceManager):
+                        raise RuntimeError("非Git快照任务必须使用沙箱验收")
                     code, out = await git.run_check(val.root, self._verify_command)
                 else:
                     handle = await self._sandbox.open(
@@ -505,7 +558,9 @@ class MasterRuntime:
                         ExecutionPurpose.VALIDATION,
                     )
                     try:
-                        output = await self._sandbox.execute(handle, self._verify_command)
+                        output = await self._sandbox.execute(
+                            handle, self._verify_command, cancellation=cancellation,
+                        )
                         code = output.returncode
                         out = (output.stdout + output.stderr).decode("utf-8", errors="replace")
                     finally:

@@ -53,7 +53,8 @@ from codeagent.runtime.react_engine import ReActEngine
 from codeagent.session import AgentSession
 from codeagent.tool.approval import DenyExternalApprovalPolicy, InteractiveApprovalPolicy
 from codeagent.workspace.git_worktree import GitWorktreeWorkspaceManager
-from codeagent.workspace.manager import build_workspace_manager
+from codeagent.workspace.manager import _is_git_worktree, build_workspace_manager
+from codeagent.workspace.snapshot import SnapshotWorkspaceManager
 
 
 async def build_master(
@@ -89,7 +90,11 @@ async def build_master(
     try:
         wsm = await build_workspace_manager(config.workspace_root, isolation=isolation)
         if sandbox is not None and not isinstance(wsm, GitWorktreeWorkspaceManager):
-            raise SandboxUnavailable("Podman /task requires Git worktree isolation")
+            if _is_git_worktree(config.workspace_root):
+                raise SandboxUnavailable("Podman Git /task requires worktree isolation")
+            wsm = SnapshotWorkspaceManager(
+                config.workspace_root, config.state_root, limits=sandbox.snapshot_limits,
+            )
         if run_store is None:
             run_store = SqliteRunStore(config.state_root / "runs.db")
             await run_store.start()

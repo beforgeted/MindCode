@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from codeagent.agent.models import AgentDefinition, AgentRunResult
 from codeagent.agent.registry import AgentRegistry
 from codeagent.agent.run import AgentRun
@@ -266,3 +268,26 @@ async def test_integrator_kicks_in_after_rerun_budget_and_converges():
     # 一次初始 + 一次重跑 + 一次 Integrator 兜底 = 3 次 run；第 3 次集成成功。
     assert events.count("run:a") == 3
     assert events.count("integrate#1") == 1 and "integrate#3" in events
+
+
+async def test_scheduler_cancellation_drains_all_running_workers():
+    entered = asyncio.Event()
+    cleaned = []
+
+    class BlockingRuntime:
+        async def run(self, definition, step, **kwargs):
+            try:
+                entered.set()
+                await asyncio.Future()
+            finally:
+                cleaned.append(step.id)
+
+    scheduler = _scheduler(BlockingRuntime())
+    execution = asyncio.create_task(scheduler.run(
+        TaskGraph([Step("a", "default", "A"), Step("b", "default", "B")]), session_id="s",
+    ))
+    await entered.wait()
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+    assert set(cleaned) == {"a", "b"}

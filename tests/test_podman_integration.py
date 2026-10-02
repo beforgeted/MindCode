@@ -301,6 +301,86 @@ async def test_real_interactive_multiturn_publication_and_rejection(image, tmp_p
         assert not session._interactive.manager._handles
 
 
+@pytest.mark.parametrize("accept", [True, False], ids=["accept", "reject"])
+async def test_real_non_git_task_candidate_dag_and_validation(image, tmp_path, accept):
+    from dataclasses import replace
+
+    from codeagent.llm.stub_client import StubLlmClient
+    from codeagent.orchestration.master_session import MasterSession
+    from codeagent.orchestration.planner import StaticPlanner
+    from codeagent.orchestration.task_graph import Step, TaskGraph
+    from tests.test_master_integration import _config
+
+    root = tmp_path / "plain"
+    root.mkdir()
+    (root / "seed.txt").write_text("user")
+    (root / ".env").write_text("host-only")
+    config = replace(_config(root), home=tmp_path / "state", project_root=tmp_path / "state",
+                     execution_backend="podman", sandbox_image=image,
+                     verify_command="test $(cat seed.txt) = acceptedX && "
+                     "test $(cat note.txt) = accepted" if accept else "false")
+    config = replace(config, profile=replace(config.profile, master_max_replans=0))
+    client = StubLlmClient([
+        [("write_file", {"path": "seed.txt", "content": "accepted"})], "first done",
+        [("read_file", {"path": "seed.txt"})],
+        [("run_command", {"command": "test ! -e .env && cat seed.txt > note.txt && "
+                          "printf X >> seed.txt"})], "second done",
+    ])
+    graph = TaskGraph([Step("a", "default", "edit"),
+                       Step("b", "default", "read and append", dependencies=frozenset({"a"}))])
+    async with MasterSession(config, llm_client=client, planner=StaticPlanner(graph)) as session:
+        result = await session.run_task("edit plain project")
+        assert result.integrated is accept and result.scheduler is not None
+        read = result.scheduler.workers["b"].run.context.tool_runs[0].result
+        assert read is not None and read.content.splitlines()[-1].strip() == "1\taccepted"
+        assert all(w.result.ok and w.verification.ok for w in result.scheduler.workers.values())
+        assert all(not w.workspace.root.exists() for w in result.scheduler.workers.values())
+        assert session.master is not None and session.master._sandbox is not None
+        assert not session.master._sandbox._handles
+        assert not result.merged_branches
+    assert (root / "seed.txt").read_text() == ("acceptedX" if accept else "user")
+    assert (root / "note.txt").exists() is accept
+    assert (root / ".env").read_text() == "host-only"
+    assert not (root / ".git").exists()
+
+
+async def test_real_non_git_task_rejection_does_not_repeat_append(image, tmp_path):
+    from dataclasses import replace
+
+    from codeagent.llm.stub_client import StubLlmClient
+    from codeagent.orchestration.global_verifier import GlobalVerdict
+    from codeagent.orchestration.master_session import MasterSession
+    from codeagent.orchestration.planner import StaticPlanner
+    from codeagent.orchestration.task_graph import Step, TaskGraph
+    from tests.test_master_integration import _config
+
+    (tmp_path / "seed.txt").write_text("user")
+    config = replace(_config(tmp_path), home=tmp_path / ".codeagent",
+                     project_root=tmp_path / ".codeagent", execution_backend="podman",
+                     sandbox_image=image, verify_command="test $(cat seed.txt) = userX")
+
+    class RejectOnce:
+        calls = 0
+
+        async def verify(self, task, graph, results, target=None):
+            self.calls += 1
+            return GlobalVerdict(accept=self.calls > 1, reason="retry")
+
+    client = StubLlmClient([
+        [("run_command", {"command": "printf X >> seed.txt"})], "done",
+        [("run_command", {"command": "printf X >> seed.txt"})], "done",
+    ])
+    async with MasterSession(
+        config, llm_client=client,
+        planner=StaticPlanner(TaskGraph([Step("a", "default", "append")])),
+        global_verifier=RejectOnce(),
+    ) as session:
+        result = await session.run_task("append once")
+        assert result.integrated and result.replans == 1
+    assert (tmp_path / "seed.txt").read_text() == "userX"
+    assert not (tmp_path / ".git").exists()
+
+
 @pytest.mark.parametrize("git", [True, False], ids=["dirty_git", "plain_directory"])
 @pytest.mark.parametrize("accept", [True, False], ids=["accept", "reject"])
 async def test_real_shared_interactive_preserves_user_state(image, tmp_path, git, accept):
@@ -345,3 +425,49 @@ async def test_real_shared_interactive_preserves_user_state(image, tmp_path, git
             assert not (tmp_path / ".git").exists()
         assert (await session.send("read after acceptance or rejection")).ok
         assert session._interactive is not None and not session._interactive.manager._handles
+
+
+async def test_real_non_git_task_cancellation_drains_domain(image, tmp_path):
+    import asyncio
+    from dataclasses import replace
+
+    from codeagent.execution.models import ExecutionPurpose
+    from codeagent.llm.stub_client import StubLlmClient
+    from codeagent.orchestration.master_session import MasterSession
+    from codeagent.orchestration.planner import StaticPlanner
+    from codeagent.orchestration.task_graph import Step, TaskGraph
+    from tests.test_master_integration import _config
+
+    (tmp_path / "seed.txt").write_text("user")
+    config = replace(_config(tmp_path), home=tmp_path / ".codeagent",
+                     project_root=tmp_path / ".codeagent", execution_backend="podman",
+                     sandbox_image=image, verify_command="true")
+    client = StubLlmClient([[("run_command", {"command": "sleep 300"})], "done"])
+    async with MasterSession(
+        config, llm_client=client,
+        planner=StaticPlanner(TaskGraph([Step("a", "default", "wait")])),
+    ) as session:
+        assert session.master is not None and session.master._sandbox is not None
+        manager = session.master._sandbox
+        execution = asyncio.create_task(session.run_task("cancel me"))
+        try:
+            for _ in range(120):
+                handles = [h for h in manager._handles.values()
+                           if h.purpose == ExecutionPurpose.WORKER]
+                if handles:
+                    output = await manager._checked("top", handles[0].container_id, "hpid")
+                    if len(output.stdout.decode().splitlines()) >= 4:
+                        break
+                await asyncio.sleep(.1)
+            else:
+                pytest.fail("did not observe running command inside worker container")
+            execution.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(execution, 20)
+            assert not manager._handles
+        finally:
+            if not execution.done():
+                execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+    assert (tmp_path / "seed.txt").read_text() == "user"
+    assert not (tmp_path / ".git").exists()

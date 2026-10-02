@@ -185,7 +185,8 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
     # 调试信息（非用户待办）：内部集成冲突/分支,仅供排查。
     if final.merge_conflicts:
         print(f"[调试] 内部集成冲突: {'; '.join(final.merge_conflicts)}")
-    print(f"[调试] master_run_id={final.master_run_id}（未完成可 /task --resume 续跑）")
+    hint = "未完成可 /task --resume 续跑" if master.supports_resume else "非Git任务请核对后新建任务"
+    print(f"[调试] master_run_id={final.master_run_id}（{hint}）")
     if final.trajectory_path:
         print(f"[轨迹导出] {final.trajectory_path}")
     elif final.trajectory_error:

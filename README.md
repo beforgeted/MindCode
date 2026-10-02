@@ -8,8 +8,8 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 收尾接线 **A1 / A3 / C7 / A2** 已实现：会话计量、交互审批、Worker 记忆候选抽取与延后外部动作恢复。
 优化 **O1** 已实现：角色/模型调用归因、Attempt 状态历史与任务轨迹 JSON 导出。
 优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback（金额预算路由待做）。
-**B4/B5 沙箱**已接入 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
-离线执行与受校验快照回传。独立 Ubuntu VM 最新验收 **454 passed、1 skipped**，14 个真容器用例通过；
+**B4/B5 沙箱**已接入 Git / 非 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
+离线执行与受校验快照回传。独立 Ubuntu VM 最新验收 **475 passed、1 skipped**，18 个真容器用例通过；真实 deepseek-flash 历史11场景和非Git任务正/负例均通过。
 详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
 
 ## 快速开始
@@ -212,7 +212,7 @@ python -m codeagent.cli.app --workspace /path/to/git-repo
 `run_command` 都访问容器 `/workspace`；新自定义工具必须先适配沙箱，否则拒绝运行。
 Memory、Evidence 与 Artifact 的固定内置读取工具由控制面提供。
 
-输入来自本次隔离 Git worktree 的有界数据快照，排除 `.git`、`.codeagent`、`.env` 与 `.env.*`。
+输入来自本次私有目录（Git worktree 或非 Git 快照候选）的有界数据快照，排除 `.git`、`.codeagent`、`.env` 与 `.env.*`。
 容器没有宿主 worktree 挂载、没有网络、根文件系统只读；项目与临时数据使用限额 tmpfs。
 启动时在导入项目文件前检查实际 UID、capabilities、seccomp、网络接口和 cgroup 限额。
 默认每域 1 CPU / 512 MiB 内存 / 64 进程，workspace 256 MiB、临时目录 64 MiB、单命令
@@ -225,7 +225,7 @@ Worker 与本地验证器均成功后，先冻结容器，由可信宿主辅助�
 单文件 8 MiB、总内容 64 MiB。失败、取消或清理失败的 Worker 不发布输出。
 
 确定性验收使用另一个容器，其文件改动不回传。退出码失败或沙箱异常会阻止 promote。
-Git `/task` 与普通单 Agent 交互均已接入；普通交互支持非 Git 目录，非 Git `/task` 仍待接入。
+Git 与非 Git 的 `/task` 和普通单 Agent 交互均已接入；默认 local 后端仍在本机执行。
 干净 Git 根工作区的普通交互每轮创建隔离候选，
 文件工具和命令在同一个容器执行；上下文跨轮保留，容器、临时文件及迭代预算不跨轮复用。
 读任务不创建项目提交；有文件改动时必须配置 `CODEAGENT_VERIFY_CMD`，在独立验收容器通过后
@@ -255,7 +255,7 @@ python -m pytest -q tests/test_execution_snapshot.py tests/test_sandbox_workspac
 活跃实例保留；删除失败或存在性未知保留记录并拒绝继续。不扫描其他容器。
 独立 Ubuntu VM（`6.8.0-142-generic`）追加全量 **415 passed、1 skipped**，Ruff / Pyright 通过，
 8 个真容器用例和独立内核探针通过，容器清单为空；与此前 WSL2 395 / 1 分开记录。
-待完成：非 Git `/task` 沙箱、按需网络策略及历史真实模型场景复验。资源账本不替代同 run 的跨进程恢复锁。
+待完成：非 Git 任务持久化恢复、按需网络策略。资源账本不替代同 run 的跨进程恢复锁。
 
 ### 延后外部动作的恢复边界（A2）
 
@@ -297,3 +297,28 @@ Windows **356 passed、99 skipped**，Ruff / Pyright 通过。含未提交修改
 日志在 state_root/publication/<工作区路径摘要>，目录0700、文件0600，保存有界前后文件内容，模型不可访问。
 MindCode 写入使用 flock 串行化，并在输入与写回前后复查工作树、HEAD、分支和暂存内容。该锁无法约束
 不遵守租约的外部编辑器，多个文件的可见性也不是全局原子事务；文件与目录互相转换暂时拒绝。
+
+
+2026-10-02 非 Git `/task` 追加验收：独立 Ubuntu VM **475 passed、1 skipped**，18 个真容器用例通过；
+Windows **357 passed、119 skipped**，Ruff / Pyright 通过。真实 REPL 的 `/task` → 普通读取 → /clear → 退出
+通过，容器清单为空。先提交共享交互阶段 `890bae7`，本节新实现尚未提交；未使用 WSL 测试。
+
+非 Git `/task` 使用数据快照候选，Worker 各自隔离；成功冻结/销毁容器后只向私有候选集成差异。
+前驱集成后才解锁后继；并行兄弟发现读写重叠，或 shell/搜索读集未知且候选已变时，丢弃旧输出再重跑。
+整批冻结成内容摘要，提供真实文件差异与独立容器确定性验收给全局门禁。包含写入时必须配置
+CODEAGENT_VERIFY_CMD；缺验收、失败或结果不确定均不接受，拒绝的 Attempt 从原始快照重建，避免重复追加。
+通过后复用共享写回日志与项目级租约，只发布实际差异；不创建 .git 或 Git 提交，不在宿主执行延后外部动作。
+已集成 Worker 的私有目录与无引用修订及时释放；最终文件清单只列实际发布文件。
+
+非 Git 任务取消先停止并等待所有 Worker 的容器清理，再删除私有 staging，RunStore 记录 cancelled。
+发布冲突或决定未知沿用“待核对”处理。当前 snapshot:<SHA256> 是内容修订标识，不是 Git SHA，
+candidate/worker 标识是内部引用。它们写入 RunStore 作 Attempt 观测，但候选数据尚未跨进程持久化。
+因此非 Git 沙箱 `/task --resume` 明确拒绝，不修改旧记录，CLI 也不提示可以恢复；请核对实际成果后新建任务。
+控制器 SIGKILL 后容器仍按资源账本精确回收；私有磁盘 staging 尚无跨进程自动清理，任务恢复与租约不能混淆。
+共享写回仍是逐文件事务：外部编辑器不遵守租约时存在检查/写入竞态，不提供全文件系统原子 CAS。
+
+
+2026-10-02 提交前复验：独立VM以固定含pytest镜像运行真实deepseek-flash，历史场景 **11/11通过**，
+非Git任务正/负例 **2/2通过**，并验证任务后普通交互；verify_fail拒绝两次Attempt后base不推进且无note.txt。
+之后VM全量重新通过475 / 1（18真容器），Windows重新通过357 / 119，静态检查通过，无容器残留。
+原仓库与历史失败现场保留，未使用WSL；证据和单次评测边界见Linux沙箱验收记录末节。

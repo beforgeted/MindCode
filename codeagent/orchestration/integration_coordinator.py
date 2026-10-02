@@ -23,6 +23,7 @@ from codeagent.infra.metrics import Metrics
 from codeagent.runtime.agent_runtime import WorkerRun
 from codeagent.workspace.git_worktree import GitWorktreeError, GitWorktreeWorkspaceManager
 from codeagent.workspace.manager import WorkspaceManager
+from codeagent.workspace.snapshot import SnapshotWorkspaceManager
 
 # 会"读"工作区、但读集可枚举的工具;run_command 读集不可知 → 保守判可能重叠。
 _READ_TOOLS = {"read_file", "grep", "read_artifact"}
@@ -59,6 +60,18 @@ class IntegrationCoordinator:
 
         ws = worker.workspace
         wsm = self._wsm
+        if isinstance(wsm, SnapshotWorkspaceManager) and isinstance(candidate, WorkspaceContext):
+            reads, unknown = _read_info(worker)
+            # A search without one explicit file can depend on any candidate content.
+            unknown |= any(run.call.name == "grep" for run in worker.run.context.tool_runs)
+            try:
+                status, overlap = await wsm.integrate(
+                    ws, candidate, read_set=reads, reads_unknown=unknown,
+                )
+            except Exception as exc:
+                return IntegrationOutcome("failed", conflict=str(exc))
+            self._metrics.incr("integration.stale" if status == "stale" else "integration.merged")
+            return IntegrationOutcome(status, overlap=overlap)
         if (
             not ws.is_isolated
             or not ws.branch_name
