@@ -302,6 +302,19 @@ class RunStoreError(RuntimeError):
 
 
 _SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS llm_cost (
+    call_id TEXT PRIMARY KEY,
+    master_run_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    pico_usd TEXT,
+    status TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS llm_cost_run ON llm_cost(master_run_id);
+CREATE TABLE IF NOT EXISTS llm_cost_origin (
+    master_run_id TEXT PRIMARY KEY,
+    complete INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS snapshot_run (
     master_run_id TEXT PRIMARY KEY,
     binding TEXT NOT NULL,
@@ -409,6 +422,20 @@ class SqliteRunStore:
                          (master_run_id,),
                      )]
             return {"transitions": transitions, "steps": steps}
+        return await self._run(op)
+
+    async def load_costs(self, master_run_id: str) -> list[dict[str, Any]]:
+        def op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return [dict(row) for row in conn.execute(
+                'SELECT * FROM llm_cost WHERE master_run_id=? ORDER BY rowid', (master_run_id,),
+            )]
+        return await self._run(op)
+
+    async def load_cost_origin(self, master_run_id: str) -> bool | None:
+        def op(conn: sqlite3.Connection) -> bool | None:
+            row = conn.execute('SELECT complete FROM llm_cost_origin WHERE master_run_id=?',
+                               (master_run_id,)).fetchone()
+            return bool(row[0]) if row is not None else None
         return await self._run(op)
 
     async def save_deferred(

@@ -1,4 +1,4 @@
-"""角色化模型选择与显式、有限的 Provider fallback（无金额预算降级）。"""
+"""Role routing, bounded fallback and explicitly configured Worker cost thresholds."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
+from codeagent.context.token_estimator import HeuristicTokenEstimator, estimate_text
 from codeagent.evidence.event_store import RawEventStore
 from codeagent.evidence.models import AgentEvent, EventType
 from codeagent.infra.ids import new_id
@@ -16,7 +17,9 @@ from codeagent.infra.trace import current_trace, trace_scope
 from codeagent.llm.client import LlmClient, LlmError, LlmErrorKind
 from codeagent.llm.message import Message
 from codeagent.llm.observed_client import ObservedLlmClient
+from codeagent.llm.pricing import CostConfig, amount, usd
 from codeagent.llm.types import LlmResponse, ModelConfig, ToolSpec
+from codeagent.orchestration.cost_store import CostStore, cost_run
 
 
 class ModelRole(StrEnum):
@@ -116,12 +119,60 @@ class RoutingLlmClient:
         default_provider: str = "anthropic", metrics: Metrics | None = None,
         events: RawEventStore | None = None,
         session_id: str = "",
+        costs: CostConfig | None = None, cost_store: CostStore | None = None,
     ) -> None:
         self.providers = dict(providers)
         self.router = router
         self.default_provider = default_provider
         self._metrics, self._events = metrics, events
         self._session_id = session_id
+        self.costs = costs or CostConfig()
+        self.cost_store = cost_store
+
+    async def _budget_target(self, role, targets, messages, tools):
+        if self.costs.worker_threshold_usd is None or role != ModelRole.WORKER:
+            return targets
+        run_id = cost_run()
+        if run_id is None:
+            return targets  # This phase applies only to explicitly scoped Master runs.
+        if self.cost_store is None:
+            raise LlmError('预算路由缺少持久化成本存储', kind=LlmErrorKind.CONFIGURATION)
+        total, unknown = await self.cost_store.total(run_id)
+        if total < amount(self.costs.worker_threshold_usd) and not unknown:
+            return targets
+        assert self.costs.economy_worker is not None
+        price = self.costs.prices[self.costs.economy_worker]
+        assert price.context_window is not None and price.max_output_tokens is not None
+        primary = targets[0][2]
+        estimated = HeuristicTokenEstimator().estimate(messages) + sum(
+            estimate_text(repr((tool.name, tool.description, tool.input_schema))) for tool in tools)
+        output_limit = min(primary.max_output_tokens, price.max_output_tokens)
+        reason = 'cost_unknown' if unknown else 'cost_threshold'
+        if tools and not price.tools:
+            reason = 'economy_tools_unsupported'
+        elif estimated + output_limit >= price.context_window:
+            reason = 'economy_context_too_small'
+        else:
+            economy = self._target(replace(primary, model=self.costs.economy_worker,
+                                           context_window=price.context_window,
+                                           max_output_tokens=output_limit))
+            targets = [economy, *(t for t in targets[1:]
+                                   if (t[0], t[2].model) != (economy[0], economy[2].model))]
+        if self._events is not None:
+            try:
+                self._events.append_nowait(AgentEvent(
+                    EventType.MODEL_BUDGET_ROUTE,
+                    str(current_trace().get('session_id', self._session_id)),
+                    payload={'trace': current_trace(), 'reason': reason,
+                             'known_cost_usd': usd(total), 'unknown_cost_calls': unknown,
+                             'estimated_input_tokens': estimated,
+                             'selected_provider': targets[0][0],
+                             'selected_model': targets[0][2].model},
+                ))
+            except Exception:
+                if self._metrics is not None:
+                    self._metrics.incr('observability.event_failures')
+        return targets
 
     def _target(self, config: ModelConfig) -> tuple[str, LlmClient, ModelConfig]:
         _validate_name(config.model)
@@ -144,6 +195,8 @@ class RoutingLlmClient:
         self, messages: Sequence[Message], *, model_config: ModelConfig,
         tools: Sequence[ToolSpec] = (),
     ) -> LlmResponse:
+        if self.costs.economy_worker is not None:
+            self._target(replace(model_config, model=self.costs.economy_worker))
         targets = []
         seen = set()
         # 先验证完整路由，配置错误不能在已经调用主模型后才暴露。
@@ -155,6 +208,7 @@ class RoutingLlmClient:
                 targets.append((provider, client, effective))
         if len(targets) > 4:
             raise LlmError("最多允许 4 个候选模型", kind=LlmErrorKind.CONFIGURATION)
+        targets = await self._budget_target(self._role(), targets, messages, tools)
         route_id = new_id("route")
         for index, (provider, client, config) in enumerate(targets):
             with trace_scope(route_id=route_id, route_attempt=index + 1, provider=provider):
@@ -194,6 +248,7 @@ class RoutingLlmClient:
 def attach_routing(
     client: LlmClient, config: ModelRoutingConfig, *, metrics: Metrics,
     events: RawEventStore, session_id: str,
+    costs: CostConfig | None = None, cost_store: CostStore | None = None,
 ) -> RoutingLlmClient:
     if isinstance(client, RoutingLlmClient):
         providers, default_provider = client.providers, client.default_provider
@@ -201,7 +256,11 @@ def attach_routing(
     else:
         providers, default_provider = {"anthropic": client}, "anthropic"
         router = StaticModelRouter(config)
-    observed = {key: ObservedLlmClient(value, metrics=metrics, events=events, session_id=session_id)
+    if costs is None and isinstance(client, RoutingLlmClient):
+        costs, cost_store = client.costs, client.cost_store
+    observed = {key: ObservedLlmClient(value, metrics=metrics, events=events, session_id=session_id,
+                                     costs=costs, cost_store=cost_store)
                 for key, value in providers.items()}
     return RoutingLlmClient(observed, router, default_provider=default_provider,
-                            metrics=metrics, events=events, session_id=session_id)
+                            metrics=metrics, events=events, session_id=session_id,
+                            costs=costs, cost_store=cost_store)

@@ -24,6 +24,7 @@ from codeagent.infra.ids import new_event_id
 class EventType(StrEnum):
     LLM_CALL = "llm_call"
     MODEL_FALLBACK = "model_fallback"
+    MODEL_BUDGET_ROUTE = "model_budget_route"
     NETWORK_DOWNLOAD = "network_download"
     USER_MESSAGE = "user_message"
     ASSISTANT_MESSAGE = "assistant_message"

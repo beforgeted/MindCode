@@ -30,6 +30,7 @@ from codeagent.llm.routing import attach_routing
 from codeagent.llm.types import ModelConfig
 from codeagent.memory.governance_repository import MemoryGovernanceRepository
 from codeagent.observability import JsonTrajectoryExporter
+from codeagent.orchestration.cost_store import CostStore
 from codeagent.orchestration.global_verifier import (
     GlobalVerifier,
     LlmGlobalVerifier,
@@ -74,8 +75,13 @@ async def build_master(
     artifact_store: ArtifactStore | None = None,
 ) -> MasterRuntime:
     """装配 MasterRuntime。stub LLM 下 Verifier 用确定性实现，真实模型下用 LLM 实现。"""
+    if config.costs.prices and run_store is not None:
+        if (not isinstance(run_store, SqliteRunStore) or
+                run_store._path != (config.state_root / 'runs.db').resolve()):
+            raise ValueError('成本路由要求与默认RunStore相同的SQLite路径')
     llm_client = attach_routing(
         llm_client, config.models, metrics=metrics, events=event_store, session_id="",
+        costs=config.costs, cost_store=CostStore(config.state_root / 'runs.db'),
     )
     sandbox = None
     if config.execution_backend == "podman":
@@ -153,6 +159,7 @@ async def build_master(
             sandbox_manager=sandbox,
             memory_writer=memory_writer,
             run_store=run_store,
+            cost_store=CostStore(config.state_root / 'runs.db') if config.costs.prices else None,
             metrics=metrics,
             approval_policy=(
                 InteractiveApprovalPolicy()

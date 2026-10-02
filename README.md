@@ -7,11 +7,10 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 + 工具执行安全 + Attempt 级幂等崩溃恢复 + 小规模质量 benchmark）。
 收尾接线 **A1 / A3 / C7 / A2** 已实现：会话计量、交互审批、Worker 记忆候选抽取与延后外部动作恢复。
 优化 **O1** 已实现：角色/模型调用归因、Attempt 状态历史与任务轨迹 JSON 导出。
-优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback（金额预算路由待做）。
+优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback；R1二期显式定价、持久化成本与Worker阈值降级也已实现。
 **B4/B5 沙箱**已接入 Git / 非 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
 离线执行与受校验快照回传。B5 一期新增受控 HTTPS 文件下载，容器仍断网。C6 同 run 跨进程恢复互斥、
-非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **611 passed、1 skipped**，
-30 个真容器用例通过；Windows **459 passed、153 skipped**，两端 Ruff/Pyright 通过。
+非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **647 passed、1 skipped**，30 个真容器用例通过；Windows **495 passed、153 skipped**，两端 Ruff/Pyright 通过。
 真实 deepseek-flash 历史11场景和非Git任务正/负例通过是此前阶段的模型回归；本期恢复测试用Stub固定
 模型步骤，容器与进程强杀是真实操作，下载回归使用真实HTTPS。
 详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
@@ -148,7 +147,7 @@ $env:CODEAGENT_MODEL_FALLBACK_PLANNER = "backup-model-a;backup-model-b"
 
 每次候选调用分别写入 O1 的 `llm_call`，带 `route_id`、`route_attempt`、`provider` 与错误分类；
 切换记录为 `model_fallback`，累加 `llm.fallbacks`，轨迹的 `by_model` 使用 `provider:model` 分组。
-成功调用只计一次用量，失败的未知用量仍不当作零费用。金额定价、预算驱动降级与任务特征路由留待后续。
+成功调用只计一次用量，未知用量不当成零费用。显式定价与Worker成本阈值路由已补齐，见末节；通用任务特征与硬预算待做。
 
 ## 任务轨迹与用量（O1）
 
@@ -168,7 +167,7 @@ $env:CODEAGENT_MODEL_FALLBACK_PLANNER = "backup-model-a;backup-model-b"
   自定义注入的组件应使用 `session.llm_client`，并可用 `RoleLlmClient` 指定角色。
 - `llm.calls` 表示成功返回的逻辑调用，`llm.attempts` 包含失败和取消；SDK 内部重试不单独拆分。
   失败/取消时未知的用量保留为 `null`，不假定为免费。输入、输出、缓存读写 token 分列记录。
-- 金额成本为 `null` / `pricing_not_configured`：尚未配置模型价格和缓存计费规则，不显示虚假的零费用。
+- 未配置价格时金额仍为null/pricing_not_configured；启用价格后区分known/partial及RunStore同步成本，不把未知当零。
 - 调用记录不复制 prompt、响应正文或异常消息。JSON 轨迹是可重建投影，恢复仍只读取 RunStore。
   异步日志在崩溃时可能丢失未落盘事件，旧运行也可能缺少关联字段；报告明确标注覆盖边界。
 - 当前导出扫描本项目所有 Session 日志以关联跨会话恢复；适用于现有本地规模，尚未加入日志索引或 OTel。
@@ -386,5 +385,26 @@ applied文件日志先保留，SQL FULL同步记账后退休，恢复不重复�
 旧run无快照、NullRunStore或无适配器定制存储仍拒绝resume；跨run归档、外部编辑器全局CAS及分布式恢复待设计。
 设计与边界见 [NON_GIT_RECOVERY_DESIGN.md](NON_GIT_RECOVERY_DESIGN.md)。
 
-下一项R1定价/动态预算路由；B5通用联网及Phase2/3仍按任务清单推进。当前B5/C6及本期新改动尚未提交。
+以上阶段已提交92c88d1；R1成本阈值路由见末节。B5通用联网及Phase2/3仍待推进。
 带日期的旧段落保留当时证据，当前状态以本节和开头进度为准。
+
+
+### R1二期：显式定价与Worker成本阈值路由（2026-10-02）
+
+独立 Ubuntu VM **647 passed、1 skipped**，30 个真容器用例通过；Windows **495 passed、153 skipped**，两端 Ruff/Pyright 通过。新增36项计入全量，金额/路由/轨迹专项66项通过，不另加总。
+上一阶段B5/C6及非Git恢复已提交92c88d1；本期新改动尚未提交。
+
+CODEAGENT_MODEL_PRICES指定USD/百万token价格JSON；CODEAGENT_WORKER_COST_THRESHOLD_USD与
+CODEAGENT_MODEL_ECONOMY_WORKER成对启用Worker阈值降级，默认不配置时保持原行为。
+输入/输出/缓存读写分别按显式单价计价，内部整数picodollar；价格文件不内置供应商现价。
+请求前向原runs.db同步记成本意图，返回后记金额或unknown；恢复沿用本run成本，旧历史无覆盖也不当零。
+轨迹同时显示RunStore同步成本下界与事件投影。模型、角色、价格及切换原因有观测记录，异步事件失败不改路由决定。
+
+已知成本达阈值或有未知项时，后续Worker尝试指定经济模型；Planner/Verifier等角色保留原配置。
+经济模型必须声明工具/窗口/输出能力，不适用时保留原模型；现有TokenEstimator估算，不新增热路径精确计数。
+这是软阈值：并发在途、验收器、能力拒绝和显式fallback都可能使实际费用超阈值，不承诺账单硬上限。
+普通交互无Master scope，不按本期任务阈值降级。1小时缓存写等未识别计价类别保守unknown。
+配置与边界见 [R1_COST_ROUTING.md](R1_COST_ROUTING.md)。
+
+金额和角色测试使用固定Provider，无新付费模型调用，不宣称已证明真实成本节省或质量不降。
+下一项仍需完整模型能力/通用任务特征适配，以及真实模型质量与成本评测；硬预算另行设计。

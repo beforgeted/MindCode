@@ -15,7 +15,8 @@ from uuid import uuid4
 from codeagent.evidence.event_store import RawEventStore
 from codeagent.evidence.models import AgentEvent, EventType
 from codeagent.infra.trace import current_trace
-from codeagent.orchestration.run_store import RunStore
+from codeagent.llm.pricing import usd
+from codeagent.orchestration.run_store import RunStore, SqliteRunStore
 
 
 class TrajectoryExporter(Protocol):
@@ -41,6 +42,15 @@ def summarize_calls(calls: list[dict[str, Any]]) -> dict[str, Any]:
         else:
             for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
                 result[key] += usage.get(key, 0)
+    priced = [c for c in calls if c.get('cost_pico_usd') is not None]
+    configured = any(c.get('cost_status') in ('known', 'unknown') for c in calls)
+    if configured:
+        known = sum(int(c['cost_pico_usd']) for c in priced)
+        result['known_cost_usd'] = usd(known)
+        result['unknown_cost_calls'] = len(calls) - len(priced)
+        result['cost_status'] = 'known' if len(priced) == len(calls) else 'partial'
+        result['cost'] = usd(known) if len(priced) == len(calls) else None
+        result['currency'] = 'USD'
     return result
 
 
@@ -79,6 +89,10 @@ class JsonTrajectoryExporter:
             raise ValueError("无效的 master_run_id")
         record = await self._store.load_run(master_run_id)
         observations = await self._store.load_observations(master_run_id)
+        durable = (await self._store.load_costs(master_run_id)
+                   if isinstance(self._store, SqliteRunStore) else [])
+        origin = (await self._store.load_cost_origin(master_run_id)
+                  if isinstance(self._store, SqliteRunStore) else None)
         await self._events.flush()
         selected: list[AgentEvent] = []
         # resume 可能发生在新 Session，必须跨 Session 关联；不能只看创建 run 的会话。
@@ -124,6 +138,16 @@ class JsonTrajectoryExporter:
                                     if record and not observations["steps"] else {},
             "deferred_actions": deferred,
             "llm_calls": calls, "tools": tools, "worker_events": workers,
+            "durable_cost": {
+                'known_cost_usd': usd(sum(int(row['pico_usd']) for row in durable
+                                          if row['pico_usd'] is not None)),
+                'unknown_cost_calls': sum(row['pico_usd'] is None for row in durable)
+                                      + int(origin is False),
+                'attempts': len(durable), 'source': 'RunStore',
+                'prior_coverage': origin,
+            },
+            "budget_routes": [dict(e.payload) for e in selected
+                              if e.type == EventType.MODEL_BUDGET_ROUTE],
             "model_fallbacks": [dict(e.payload) for e in selected
                                 if e.type == EventType.MODEL_FALLBACK],
             "totals": summarize_calls(calls),
@@ -169,7 +193,10 @@ def render_trajectory(report: dict[str, Any]) -> str:
              f"LLM 成功 {total['calls']} / 失败 {total['errors']} / 取消 {total['cancelled']}",
              f"Token: 输入 {total['input_tokens']} / 输出 {total['output_tokens']} / "
              f"缓存读 {total['cache_read_tokens']} / 缓存写 {total['cache_write_tokens']}",
-             "金额成本：未配置定价", "角色用量："]
+             (f"金额成本 USD：{total['cost']}" if total['cost_status'] == 'known' else
+              f"已知成本 USD：{total['known_cost_usd']}；"
+              f"未知调用 {total['unknown_cost_calls']}" if total['cost_status'] == 'partial' else
+              "金额成本：未配置定价"), "角色用量："]
     for role, values in report["by_role"].items():
         lines.append(f"  {role}: {values['calls']} 次成功，"
                      f"输入 {values['input_tokens']} / 输出 {values['output_tokens']}")

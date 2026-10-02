@@ -1,6 +1,6 @@
 # Linux Podman 分环境验收记录
 
-2026-10-02 当前最终版本：独立 Ubuntu VM **611 passed、1 skipped**，30 个真容器用例通过；Windows **459 passed、153 skipped**，两端 Ruff/Pyright 通过，容器清单为空。非Git恢复验收见末节；真实模型历史11/11与非Git2/2是此前阶段的独立记录。
+2026-10-02 当前最终版本：独立 Ubuntu VM **647 passed、1 skipped**，30 个真容器用例通过；Windows **495 passed、153 skipped**，两端 Ruff/Pyright 通过，容器清单为空。R1二期验收见末节；真实模型历史11/11与非Git2/2是此前阶段的独立记录。
 
 以下先保留此前 WSL2 一期结果，独立 VM 追加实现与证据见文末。
 
@@ -376,3 +376,30 @@ avoids_symlink_attacks属性，修正后62项通过。Windows首轮执行标志�
 没有新真实LLM评测，SIGKILL不等于停电/硬件故障验证，多文件写回不是针对外部编辑器的全局CAS。
 每run只保留原始和最新冻结快照，跨run归档/配额待做；NullRunStore/无适配器存储仍拒绝resume。
 Git未知资源及其他类别临时目录未统一GC。B5通用网络、R1预算与Phase2/3未完成。
+
+
+## 2026-10-02 追加：R1定价与Worker成本阈值路由
+
+Linux仅在独立Ubuntu VM mengx@192.168.100.128，最终目录
+/home/mengx/mindcode-r1-cost-verified.VoTJAc。205份源码/配置/测试/场景文件SHA256逐项核对，
+独立venv复用已安装依赖，python -I确认新源码；原仓库env、Git HEAD/status及历史012失败产物不变。
+独立 Ubuntu VM **647 passed、1 skipped**，30 个真容器用例通过；Windows **495 passed、153 skipped**，两端 Ruff/Pyright 通过。新增36项和66项专项都包含在全量，不加总；
+30个真实Podman/HTTPS/强杀恢复用例为现有能力回归，金额/路由通过固定Provider模拟，不新增付费模型请求。
+
+覆盖精确输入/输出/缓存计价、非法金额/重复键/缺能力、未知费用、run隔离、并发八次计费无丢失、
+新控制器同run续计、旧成本覆盖缺口、失败fallback、取消、写意图失败阻止Provider、
+经济模型工具/上下文不匹配、事件故障不改变决策、费用结果写失败保留pending，
+以及Master装配中Planner计费、仅Worker降级、两层Verifier保留模型和trajectory/同步金额对齐。
+
+Windows首轮问题为测试误用Message接口/缺导入、装配参数放错对象；静态检查与端到端用例发现后修正。
+首次VM全量645/1保留在/home/mengx/mindcode-r1-cost-final.SJQIYj；
+补齐两个失败边界后在新目录完成最终647/1复验，数字以最终XML/summary为准，未用WSL。
+最终全量后的Ruff曾检查到上传的辅助汇总脚本三处超长行；格式修正后重跑通过，
+vm-ruff-helper-failed.log保留。本次只改变辅助脚本，205份验收源码的哈希未因此变化。
+本地证据.codeagent/validation/vm-r1-verified/含XML/日志、静态检查、源文件清单、镜像/依赖、
+保护基线、最终空容器清单与r1-summary.json；Windows分别保存专项/全量/静态结果。
+
+R1二期完成范围是显式价格和软Worker阈值路由，默认配置兼容，价格由操作者验证。
+不承诺硬账单上限、跨账号预算、真实省钱比例/质量不降，也不自动识别合同折扣或1小时缓存写等价阶。
+旧run没有成本覆盖不能伪造成零；预算决策来自同RunStore同步成本，不来自异步事件。
+通用任务特征/完整模型能力、硬预算与真实质量成本评测仍待做。上一阶段提交92c88d1；本期未提交。

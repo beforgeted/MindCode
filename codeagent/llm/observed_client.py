@@ -15,7 +15,9 @@ from codeagent.infra.metrics import Metrics
 from codeagent.infra.trace import current_trace, trace_scope
 from codeagent.llm.client import LlmClient, LlmError
 from codeagent.llm.message import Message
+from codeagent.llm.pricing import CostConfig, usd
 from codeagent.llm.types import LlmResponse, ModelConfig, ToolSpec
+from codeagent.orchestration.cost_store import CostStore, cost_run
 
 
 class RoleLlmClient:
@@ -41,12 +43,15 @@ class RoleLlmClient:
 class ObservedLlmClient:
     def __init__(
         self, client: LlmClient, *, metrics: Metrics, events: RawEventStore, session_id: str,
+        costs: CostConfig | None = None, cost_store: CostStore | None = None,
     ) -> None:
         # 装配可重复，不能嵌套包装导致双计数。
         self._client = client._client if isinstance(client, ObservedLlmClient) else client
         self._metrics = metrics
         self._events = events
         self._session_id = session_id
+        self._costs = costs or CostConfig()
+        self._cost_store = cost_store
         # Provider 的历史计量接口仍可独立使用；装配后由本层统一负责会话计量。
         bind = getattr(self._client, "bind_metrics", None)
         if callable(bind):
@@ -59,6 +64,11 @@ class ObservedLlmClient:
         started_at = datetime.now(UTC).isoformat()
         started = time.perf_counter()
         call_id = new_llm_call_id()
+        run_id = cost_run()
+        provider = str(current_trace().get('provider', 'anthropic'))
+        if self._costs.prices and run_id is not None and self._cost_store is not None:
+            # Synchronous intent precedes any possibly billed provider request.
+            await self._cost_store.begin(call_id, run_id, provider, model_config.model)
         response = None
         status, error_type = "success", None
         error_kind = None
@@ -73,6 +83,13 @@ class ObservedLlmClient:
             error_kind = exc.kind if isinstance(exc, LlmError) else None
             raise
         finally:
+            price = self._costs.prices.get(f'{provider}:{model_config.model}')
+            charge = (price.charge(response.usage) if price is not None and response is not None
+                      and response.usage_complete else None)
+            cost_status = ('known' if charge is not None else 'unknown' if self._costs.prices
+                           else 'pricing_not_configured')
+            if self._costs.prices and run_id is not None and self._cost_store is not None:
+                await self._cost_store.finish(call_id, charge, cost_status)
             elapsed_ms = (time.perf_counter() - started) * 1000
             trace = current_trace()
             role = str(trace.get("role", "unattributed"))
@@ -98,6 +115,10 @@ class ObservedLlmClient:
                         "started_at": started_at, "elapsed_ms": elapsed_ms,
                         "status": status, "error_type": error_type, "error_kind": error_kind,
                         "usage": asdict(response.usage) if response else None,
+                        "cost_usd": usd(charge) if charge is not None else None,
+                        "cost_pico_usd": str(charge) if charge is not None else None,
+                        "cost_status": cost_status,
+                        "pricing": asdict(price) if price is not None else None,
                     },
                 ))
             except Exception:

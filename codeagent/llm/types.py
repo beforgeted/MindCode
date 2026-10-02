@@ -40,6 +40,8 @@ class LlmResponse:
     blocks: tuple[Block, ...] = ()
     stop_reason: str | None = None
     usage: Usage = field(default_factory=Usage)
+    # Custom providers must explicitly confirm billing usage; missing usage is never free.
+    usage_complete: bool = False
 
     @property
     def tool_uses(self) -> tuple[ToolUseBlock, ...]:

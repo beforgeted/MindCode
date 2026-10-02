@@ -29,6 +29,7 @@ from codeagent.infra.ids import new_id
 from codeagent.infra.metrics import Metrics
 from codeagent.infra.trace import trace_scope, update_trace
 from codeagent.observability import TrajectoryExporter
+from codeagent.orchestration.cost_store import CostStore, cost_scope
 from codeagent.orchestration.global_verifier import GlobalVerifier, VerificationTarget
 from codeagent.orchestration.planner import Planner
 from codeagent.orchestration.run_lock import RunLeaseManager, RunLockBusy, RunLockError
@@ -104,6 +105,7 @@ class MasterRuntime:
         trajectory_timeout_seconds: float = 10.0,
         sandbox_manager: PodmanSandboxManager | None = None,
         run_leases: RunLeaseManager | None = None,
+        cost_store: CostStore | None = None,
     ) -> None:
         self._planner = planner
         self._scheduler = scheduler
@@ -127,6 +129,7 @@ class MasterRuntime:
         self._trajectory_exporter = trajectory_exporter
         self._trajectory_timeout = trajectory_timeout_seconds
         self._sandbox = sandbox_manager
+        self._cost_store = cost_store
         self._run_leases = run_leases or RunLeaseManager(
             self._run_store.run_lock_directory
             if isinstance(self._run_store, SqliteRunStore) else None,
@@ -147,7 +150,7 @@ class MasterRuntime:
         # Acquire before reading recovery state, planning, reclaiming or exporting.
         # New runs hold the same lease so resume cannot steal an active new run.
         try:
-            with self._run_leases.acquire(master_run_id):
+            with self._run_leases.acquire(master_run_id), cost_scope(master_run_id):
                 return await self._run_owned(
                     task, session_id=session_id, cancellation=cancellation,
                     resume_master_run_id=resume_master_run_id, master_run_id=master_run_id,
@@ -187,6 +190,10 @@ class MasterRuntime:
                             )
                     snapshot.begin(master_run_id, checkpoint)
                     owns_snapshot = True
+                if self._cost_store is not None:
+                    await self._cost_store.initialize_run(
+                        master_run_id, resumed=resume_master_run_id is not None,
+                    )
                 final = await self._run(
                     task, session_id=session_id, cancellation=cancellation,
                     resume_master_run_id=resume_master_run_id, master_run_id=master_run_id,

@@ -125,6 +125,10 @@ class AnthropicLlmClient:
             blocks=tuple(blocks),
             stop_reason=getattr(resp, "stop_reason", None),
             usage=usage,
+            usage_complete=(all(getattr(resp.usage, name, None) is not None
+                                for name in ('input_tokens', 'output_tokens'))
+                            and not getattr(getattr(resp.usage, 'cache_creation', None),
+                                            'ephemeral_1h_input_tokens', 0)),
         )
 
     async def count_tokens(

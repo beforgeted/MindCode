@@ -37,6 +37,7 @@ from codeagent.memory.models import MemorySource
 from codeagent.memory.retriever import KeywordMemoryRetriever
 from codeagent.memory.service import MemoryService
 from codeagent.memory.sqlite_store import SqliteMemoryStore
+from codeagent.orchestration.cost_store import CostStore
 from codeagent.runtime.interactive_sandbox import InteractiveSandbox
 from codeagent.runtime.react_engine import ReActEngine
 from codeagent.tool.approval import DenyExternalApprovalPolicy, InteractiveApprovalPolicy
@@ -71,6 +72,7 @@ class AgentSession:
         self.llm_client = attach_routing(
             llm_client, config.models, metrics=self.metrics,
             events=self.event_store, session_id=self.session_id,
+            costs=config.costs, cost_store=CostStore(config.state_root / 'runs.db'),
         )
         llm_client = self.llm_client
         self.artifact_store = FileArtifactStore(config.state_root)
