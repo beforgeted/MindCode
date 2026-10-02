@@ -107,14 +107,14 @@ a→b→c 不误报）。`python -m scenarios.planner_probe --samples 5`。
 
 
 
-## 独立VM的沙箱复验（2026-10-02）
+## 沙箱运行与测试结果
 
 项目规定Linux测试只在独立Ubuntu VM运行，禁止使用WSL Ubuntu。运行模型前应显式设置
 CODEAGENT_EXECUTION_BACKEND=podman、CODEAGENT_SANDBOX_IMAGE为已安装的完整SHA256 ID；
 按场景配置独立验收命令。仅设置MINDCODE_PODMAN_TEST_IMAGE不会切换应用后端，默认后端仍为local。
 真实模型必须确认use_stub_llm=False；模型凭据只放控制面，容器保持断网且不挂载宿主目录。
 
-本次独立目录 /home/mengx/mindcode-real-revalidation.XACDvV，真实deepseek-flash历史11场景各一次，
-11/11通过，另测非Git任务正/负例及普通交互。保留现场和逐场景报告；详情见仓库Linux沙箱验收记录末节。
-这是单次既有判据的回归，不是19任务benchmark或SWE-bench成绩；verify_fail还需核对Worker确实完成、
+最新完整验收及历史真实模型回归的适用范围统一见[测试总览](../docs/testing/README.md)，
+沙箱判据见[沙箱与恢复测试](../docs/testing/sandbox-and-recovery.md)。个人现场与原始报告不随仓库发布。
+历史11场景回归不是19任务benchmark或SWE-bench成绩；verify_fail还需核对Worker确实完成、
 验收拒绝、base不动与产物不存在，避免把没有发生的写入误报为隔离成功。
