@@ -10,7 +10,7 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback；R1二期显式定价、持久化成本与Worker阈值降级也已实现。
 **B4/B5 沙箱**已接入 Git / 非 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
 离线执行与受校验快照回传。B5 一期新增受控 HTTPS 文件下载，容器仍断网。C6 同 run 跨进程恢复互斥、
-非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **685 passed、1 skipped**，30 个真容器用例通过；Windows **533 passed、153 skipped**，两端 Ruff/Pyright 通过。
+非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **716 passed、1 skipped**，30 个真容器用例通过；Windows **564 passed、153 skipped**，两端 Ruff/Pyright 通过。
 真实 deepseek-flash 历史11场景和非Git任务正/负例通过是此前阶段的模型回归；本期恢复测试用Stub固定
 模型步骤，容器与进程强杀是真实操作，下载回归使用真实HTTPS。
 详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
@@ -419,4 +419,17 @@ CODEAGENT_MODEL_CAPABILITIES指定独立能力目录；精确provider:model声�
 Worker准备预算扣除输出和工具声明，进入现有ContextManager；所有角色chat经过能力门禁，但自动重分压缩chunk/长输入仍待做。
 trajectory增加capability_routes；事件故障不改变能力决策，未启用目录兼容旧行为。
 模型能力是显式元数据和启发式检查，没有精确token保证、完整参数协商或硬预算；设计见[MODEL_CAPABILITIES.md](MODEL_CAPABILITIES.md)。
-R1二期已提交dbae3a7，本期能力适配已验收并随本次提交归档；下一项可继续压缩Map/Reduce窗口与chunk适配。
+R1二期已提交dbae3a7，模型能力适配已提交9451e8e；下一项可继续压缩Map/Reduce窗口与chunk适配。
+
+
+### R1三期第二部分：Map/Reduce窗口与请求规划（2026-10-03）
+
+独立 Ubuntu VM **716 passed、1 skipped**，30 个真容器用例通过；Windows **564 passed、153 skipped**，两端 Ruff/Pyright 通过。31项新增与131项专项包含在全量；固定Provider验证，无新真实LLM质量/费用评测。
+Map按实际System/Focus/历史JSON/输出/修复预留规划完整turn，不适用单turn保留原文且不发送请求。
+Reduce有序分批，每批重新估算当前检查点与delta；临时状态只在内存，全部成功后一次替换历史并递增一个公开版本。
+CODEAGENT_COMPACTION_REDUCE_MAX_BATCHES默认32，正常和应急Reduce共享；逻辑批次限制不等于金额或Provider调用硬上限。
+失败、截断、膨胀、超时或预算耗尽不发布中间结果，原Map并发与取消排空规则保留。
+LLM trace新增compaction_id与chunk/批号/版本，既有trajectory可查看。
+生产字节与全量快照一致；唯一测试类型标注修正后两端重查31项及静态，修正前证据保留。
+设计见[COMPACTION_WINDOW_ADAPTATION.md](COMPACTION_WINDOW_ADAPTATION.md)。上一阶段已提交9451e8e，本期压缩适配已验收并随本次提交归档。
+后续Planner/Verifier长输入规划、精确计数校准、完整参数协商及真实质量/费用评测待做。

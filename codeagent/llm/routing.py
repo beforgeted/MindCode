@@ -145,6 +145,12 @@ class RoutingLlmClient:
     def _tool_tokens(tools: Sequence[ToolSpec]) -> int:
         return sum(estimate_text(repr((t.name, t.description, t.input_schema))) for t in tools)
 
+    def effective_config(self, model_config: ModelConfig) -> ModelConfig:
+        """Resolve the current role's primary limits without network requests or billing."""
+        config = self.router.resolve(self._role(), base=model_config)
+        provider, _, effective = self._target(config)
+        return replace(effective, model=f'{provider}:{effective.model}')
+
     def context_profile(
         self, base: ModelConfig, profile: ContextProfile, tools: Sequence[ToolSpec] = (),
     ) -> ContextProfile:

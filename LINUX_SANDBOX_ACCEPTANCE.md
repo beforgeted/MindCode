@@ -421,3 +421,23 @@ AgentSession真实prepare预算、全部七类角色/计数、事件故障与轨
 初次SSH因虚拟机未启动超时，用户重启后成功；首次本地测试用pytest保留名request导致收集失败，已修正。
 能力/费用仍使用固定Provider；没有新增付费LLM质量或成本节省评测，不能将控制流回归当成供应商效果。
 当前只完成五项显式门禁与Worker消息预算，启发式不保证供应商精确计数；Map/Reduce chunk和完整参数协商待做。
+
+
+## 2026-10-03 追加：压缩Map/Reduce窗口适配
+
+上一阶段9451e8e；本期压缩适配已验收并随本次提交归档。独立Ubuntu VM mengx@192.168.100.128，
+独立目录/home/mengx/mindcode-compaction.U0aJul；没有运行WSL测试。
+独立 Ubuntu VM **716 passed、1 skipped**，30 个真容器用例通过；Windows **564 passed、153 skipped**，两端 Ruff/Pyright 通过。31项新增和131项专项计入全量；30个真容器回归为18个隔离、9个下载、3个强杀恢复，不把14个模拟Podman单元算作真容器。
+209份源码/配置/测试/场景源清单核对，新venv复用依赖，python -I确认新源码；
+原/home/mengx/MindCode的env、Git HEAD/status与历史012文件摘要不变，最终Podman容器为空。
+
+两端首次全量通过；Pyright发现新测试读取trace整数时缺类型收窄，修复仅新增typing.cast导入与一次标注调用。
+VM保留旧源清单、旧测试文本、原静态失败日志/退出码；脚本按精确字节替换证明其它208份文件（包含全部生产源码）未改。
+最终受影响31项和Ruff/Pyright复查通过，源清单更新该测试SHA256；全量数字不加31项复查。
+本地证据.codeagent/validation/vm-compaction/包含vm-full/unit/typing-recheck XML、前后静态日志、typing-reconciliation.json、镜像/依赖与保护基线、compaction-summary.json。
+Windows保存windows-compact-full/unit/typing-recheck XML和ruff/pyright日志。
+
+覆盖序列化包装/转义、跨Provider角色窗口、完整工具turn、局部Map保留、分批版本一次递增、
+后批异常/版本错误/截断、检查点膨胀、批次耗尽与应急共享、JSON修复预留、并发完成乱序、取消排空及Session轨迹装配。
+全部模型行为由固定Provider控制，没有新增付费LLM质量、语义保留或费用节省评测。
+单原子turn/delta过大或事实持续增长可导致明确失败，启发式不保证供应商精确窗口；Planner/Verifier长输入仍待做。

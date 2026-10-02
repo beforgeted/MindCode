@@ -13,7 +13,7 @@ from codeagent.evidence.models import AgentEvent, EventType
 from codeagent.infra.ids import new_llm_call_id
 from codeagent.infra.metrics import Metrics
 from codeagent.infra.trace import current_trace, trace_scope
-from codeagent.llm.client import LlmClient, LlmError
+from codeagent.llm.client import LlmClient, LlmError, effective_model_config
 from codeagent.llm.message import Message
 from codeagent.llm.pricing import CostConfig, usd
 from codeagent.llm.types import LlmResponse, ModelConfig, ToolSpec
@@ -24,6 +24,10 @@ class RoleLlmClient:
     def __init__(self, client: LlmClient, role: str) -> None:
         self._client = client
         self._role = role
+
+    def effective_config(self, model_config: ModelConfig) -> ModelConfig:
+        with trace_scope(role=self._role):
+            return effective_model_config(self._client, model_config)
 
     async def chat(
         self, messages: Sequence[Message], *, model_config: ModelConfig,
@@ -129,3 +133,6 @@ class ObservedLlmClient:
         tools: Sequence[ToolSpec] = (),
     ) -> int | None:
         return await self._client.count_tokens(messages, model_config=model_config, tools=tools)
+
+    def effective_config(self, model_config: ModelConfig) -> ModelConfig:
+        return effective_model_config(self._client, model_config)

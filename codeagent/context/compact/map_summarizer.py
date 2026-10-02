@@ -5,7 +5,13 @@ from dataclasses import replace
 
 from codeagent.context.compact.chunker import CompactionChunk
 from codeagent.context.compact.models import CompactionPayloadError, TaskDelta
-from codeagent.llm.client import LlmClient
+from codeagent.context.compact.request_budget import (
+    REPAIR_PROMPT,
+    CompactionBudgetError,
+    request_fits,
+)
+from codeagent.context.token_estimator import HeuristicTokenEstimator, TokenEstimator
+from codeagent.llm.client import LlmClient, effective_model_config
 from codeagent.llm.message import Message
 from codeagent.llm.types import LlmResponse, ModelConfig
 
@@ -25,9 +31,21 @@ class HistoryMapSummarizer:
         self,
         client: LlmClient,
         model_config: ModelConfig,
+        estimator: TokenEstimator | None = None,
     ) -> None:
         self._client = client
         self._model_config = model_config
+        self._estimator = estimator or HeuristicTokenEstimator()
+
+    def _config(self, max_output_tokens: int) -> ModelConfig:
+        return effective_model_config(self._client, replace(
+            self._model_config, model=self._model_config.map_model,
+            max_output_tokens=max_output_tokens, temperature=0.0,
+        ))
+
+    def fits(self, chunk: CompactionChunk, *, focus: str | None, max_output_tokens: int) -> bool:
+        return request_fits(self._messages(chunk, focus), self._config(max_output_tokens),
+                            self._estimator)
 
     async def summarize(
         self,
@@ -36,26 +54,32 @@ class HistoryMapSummarizer:
         focus: str | None,
         max_output_tokens: int,
     ) -> TaskDelta:
-        config = replace(
-            self._model_config,
-            model=self._model_config.map_model,
-            max_output_tokens=max_output_tokens,
-            temperature=0.0,
-        )
+        config = self._config(max_output_tokens)
+        messages = self._messages(chunk, focus)
+        if not request_fits(messages, config, self._estimator):
+            raise CompactionBudgetError('单个完整 Map chunk 无法容纳模型窗口与修复预留')
+        return await _call_json(self._client, messages, config, TaskDelta.from_json,
+                                estimator=self._estimator)
+
+    @staticmethod
+    def _messages(chunk: CompactionChunk, focus: str | None) -> tuple[Message, ...]:
         payload = _serialize_messages(chunk.messages)
         focus_text = focus or "Preserve all durable task state."
         prompt = (
             f"Focus: {focus_text}\nChunk tokens (estimated): {chunk.tokens}\n\n"
             f"HISTORY_JSON:\n{payload}"
         )
-        messages = (Message.system(_MAP_SYSTEM), Message.user(prompt))
-        return await _call_json(self._client, messages, config, TaskDelta.from_json)
+        return (Message.system(_MAP_SYSTEM), Message.user(prompt))
 
 
-async def _call_json(client, messages, config, parser):
+async def _call_json(client, messages, config, parser, *, estimator=None):
+    estimator = estimator or HeuristicTokenEstimator()
     last_error: Exception | None = None
     retry_messages = messages
     for attempt in range(2):
+        if not request_fits(retry_messages, effective_model_config(client, config), estimator,
+                            reserve_repair=False):
+            raise CompactionBudgetError('压缩请求或 JSON 修复请求超过有效模型窗口')
         response = await client.chat(retry_messages, model_config=config)
         try:
             _validate_stop(response)
@@ -66,10 +90,7 @@ async def _call_json(client, messages, config, parser):
                 break
             retry_messages = (
                 *messages,
-                Message.user(
-                    "The prior output was invalid. Return one strict JSON object only; "
-                    "no prose or extra keys."
-                ),
+                Message.user(REPAIR_PROMPT),
             )
     assert last_error is not None
     raise last_error

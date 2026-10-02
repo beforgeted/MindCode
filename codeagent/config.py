@@ -90,6 +90,7 @@ class AppConfig:
         profile = replace(
             ContextProfile(),
             context_window=window,
+            compaction_reduce_max_batches=_env_int('CODEAGENT_COMPACTION_REDUCE_MAX_BATCHES', 32),
             promote_max_retries=_env_int(
                 "CODEAGENT_PROMOTE_MAX_RETRIES", ContextProfile().promote_max_retries
             ),

@@ -67,3 +67,12 @@ class LlmClient(Protocol):
         这是网络调用，只允许在压缩决策边界和校准时用，不能进热路径。
         """
         ...
+
+
+def effective_model_config(client: LlmClient, config: ModelConfig) -> ModelConfig:
+    """Optional synchronous capability lookup; plain providers retain their call configuration."""
+    resolve = getattr(client, 'effective_config', None)
+    value = resolve(config) if callable(resolve) else config
+    if not isinstance(value, ModelConfig):
+        raise TypeError('effective_config must return ModelConfig')
+    return value

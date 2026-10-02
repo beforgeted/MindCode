@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from codeagent.context.history.turn import ConversationTurn
@@ -26,6 +27,7 @@ class HistoryChunker:
         turns: list[ConversationTurn],
         *,
         max_tokens: int,
+        fits: Callable[[CompactionChunk], bool] | None = None,
     ) -> tuple[CompactionChunk, ...]:
         if max_tokens <= 0:
             raise ValueError("max_tokens 必须大于 0")
@@ -34,14 +36,16 @@ class HistoryChunker:
         current_tokens = 0
         for turn in turns:
             turn_tokens = self._estimator.estimate(turn.messages)
-            if current and current_tokens + turn_tokens > max_tokens:
+            candidate = self._build([*current, turn], current_tokens + turn_tokens, max_tokens)
+            if current and (candidate.oversized or (fits is not None and not fits(candidate))):
                 chunks.append(self._build(current, current_tokens, max_tokens))
                 current = []
                 current_tokens = 0
             current.append(turn)
             current_tokens += turn_tokens
-            if turn_tokens > max_tokens:
-                chunks.append(self._build(current, current_tokens, max_tokens))
+            candidate = self._build(current, current_tokens, max_tokens)
+            if turn_tokens > max_tokens or (fits is not None and not fits(candidate)):
+                chunks.append(candidate)
                 current = []
                 current_tokens = 0
         if current:

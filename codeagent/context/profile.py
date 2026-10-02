@@ -33,6 +33,8 @@ class ContextProfile:
     reduce_max_output_tokens: int = 8_000
     checkpoint_max_tokens: int = 12_000
     compaction_map_concurrency: int = 3
+    # Shared across the initial Reduce and emergency retry; each batch has <=2 JSON attempts.
+    compaction_reduce_max_batches: int = 32
 
     # Memory 注入预算（P3）
     max_memory_injection_tokens: int = 8_000

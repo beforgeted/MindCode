@@ -66,3 +66,10 @@ Worker 每轮准备历史前，按主候选的有效窗口计算：
 本期实现五项显式能力适配；未实现 reasoning 参数、temperature 数值范围、多模态 MIME/尺寸、tool_choice、流式输出、完整参数协商、自动发现、硬预算准入或通用任务难度路由。没有新增付费模型质量/成本评测。
 
 验证结果与独立 Ubuntu VM 证据见 [Linux 验收记录](LINUX_SANDBOX_ACCEPTANCE.md) 末节；Windows 与 VM 分别记录，禁止用 WSL 结果替代。
+
+
+## 后续压缩侧适配已落地（2026-10-03）
+
+9451e8e提交的是上述能力门禁与Worker准备预算。本期新增Map实际请求分块与Reduce顺序分批，
+具体规则和失败边界见[COMPACTION_WINDOW_ADAPTATION.md](COMPACTION_WINDOW_ADAPTATION.md)。
+本文此前“压缩chunk待做”的描述为该提交阶段的边界；Planner/Verifier长输入重建及完整参数协商仍待做。

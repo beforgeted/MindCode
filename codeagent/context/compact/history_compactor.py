@@ -7,13 +7,15 @@ from codeagent.context.compact.base import CompactionResult
 from codeagent.context.compact.chunker import CompactionChunk, HistoryChunker
 from codeagent.context.compact.map_summarizer import HistoryMapSummarizer
 from codeagent.context.compact.models import TaskCheckpoint, TaskDelta
-from codeagent.context.compact.reducer import TaskStateReducer
+from codeagent.context.compact.reducer import ReduceBudget, TaskStateReducer
 from codeagent.context.history.conversation_history import validate_tool_protocol
 from codeagent.context.history.turn import TurnIdPartitioner, TurnStatus, system_messages
 from codeagent.context.profile import ContextProfile
 from codeagent.context.token_estimator import TokenEstimator
 from codeagent.infra import metrics as M
+from codeagent.infra.ids import new_id
 from codeagent.infra.metrics import Metrics
+from codeagent.infra.trace import trace_scope
 from codeagent.llm.client import LlmClient
 from codeagent.llm.message import ContextCategory, Message
 from codeagent.llm.observed_client import RoleLlmClient
@@ -39,8 +41,10 @@ class ConversationHistoryCompactor:
         self._estimator = estimator
         self._partitioner = TurnIdPartitioner()
         self._chunker = HistoryChunker(estimator)
-        self._mapper = HistoryMapSummarizer(RoleLlmClient(client, "compact_map"), model_config)
-        self._reducer = TaskStateReducer(RoleLlmClient(client, "compact_reduce"), model_config)
+        self._mapper = HistoryMapSummarizer(RoleLlmClient(client, "compact_map"), model_config,
+                                            estimator)
+        self._reducer = TaskStateReducer(RoleLlmClient(client, "compact_reduce"), model_config,
+                                        estimator)
         self._metrics = metrics or Metrics()
 
     async def compact(
@@ -55,15 +59,16 @@ class ConversationHistoryCompactor:
         source = tuple(messages)
         tokens_before = self._estimator.estimate(source)
         try:
-            async with asyncio.timeout(profile.compaction_timeout_seconds):
-                return await self._compact(
-                    source,
-                    profile=profile,
-                    focus=focus,
-                    checkpoint=checkpoint,
-                    turn_statuses=turn_statuses or {},
-                    tokens_before=tokens_before,
-                )
+            with trace_scope(compaction_id=new_id('compact')):
+                async with asyncio.timeout(profile.compaction_timeout_seconds):
+                    return await self._compact(
+                        source,
+                        profile=profile,
+                        focus=focus,
+                        checkpoint=checkpoint,
+                        turn_statuses=turn_statuses or {},
+                        tokens_before=tokens_before,
+                    )
         except TimeoutError:
             self._metrics.incr(M.CONTEXT_COMPACTION_TIMEOUTS)
             return self._failed(source, tokens_before, "压缩超时")
@@ -93,7 +98,11 @@ class ConversationHistoryCompactor:
         if not candidates:
             return self._failed(source, tokens_before, "没有可压缩的 completed turn")
 
-        chunks = self._chunker.chunk(candidates, max_tokens=profile.map_chunk_tokens)
+        budget = ReduceBudget(profile.compaction_reduce_max_batches)
+        chunks = self._chunker.chunk(candidates, max_tokens=profile.map_chunk_tokens,
+                                    fits=lambda chunk: self._mapper.fits(
+                                        chunk, focus=focus,
+                                        max_output_tokens=profile.map_max_output_tokens))
         mapped = await self._map_chunks(
             chunks,
             focus=focus,
@@ -113,11 +122,30 @@ class ConversationHistoryCompactor:
                 map_failures=len(failures),
             )
 
+        try:
+            return await self._reduce_and_assemble(
+                source, mapped, retained_ids, successes, profile, focus, checkpoint,
+                tokens_before, failures, budget,
+            )
+        except Exception as exc:
+            self._metrics.incr(M.CONTEXT_COMPACTION_FAILURES)
+            return self._failed(source, tokens_before, f'Reduce 失败: {type(exc).__name__}: {exc}',
+                                map_chunks=len(mapped), map_failures=len(failures))
+        finally:
+            self._metrics.incr('context.compaction.reduce_batches', budget.used)
+
+    async def _reduce_and_assemble(
+        self, source: tuple[Message, ...], mapped: tuple[_MappedChunk, ...], retained_ids: set[str],
+        successes: tuple[TaskDelta, ...], profile: ContextProfile, focus: str | None,
+        checkpoint: TaskCheckpoint | None, tokens_before: int, failures: tuple[_MappedChunk, ...],
+        budget: ReduceBudget,
+    ) -> CompactionResult:
         next_checkpoint = await self._reducer.reduce(
             checkpoint,
             successes,
             max_output_tokens=profile.reduce_max_output_tokens,
             focus=focus,
+            budget=budget,
         )
         candidate = self._assemble(source, mapped, retained_ids, next_checkpoint)
         tokens_after = self._estimator.estimate(candidate)
@@ -141,6 +169,7 @@ class ConversationHistoryCompactor:
                 max_output_tokens=strict_limit,
                 focus=(focus or "")
                 + "\nEmergency budget: keep every durable fact but make entries maximally concise.",
+                budget=budget,
             )
             candidate = self._assemble(source, mapped, retained_ids, next_checkpoint)
             tokens_after = self._estimator.estimate(candidate)
@@ -172,7 +201,7 @@ class ConversationHistoryCompactor:
             map_failures=len(failures),
             reason=(
                 f"压缩 {len(successes)}/{len(mapped)} 个 chunks；"
-                f"保留 {len(failures)} 个失败 chunk 原文"
+                f"保留 {len(failures)} 个失败 chunk 原文；Reduce {budget.used} 批"
             ),
         )
 
@@ -186,21 +215,27 @@ class ConversationHistoryCompactor:
     ) -> tuple[_MappedChunk, ...]:
         semaphore = asyncio.Semaphore(max(1, concurrency))
 
-        async def run(chunk: CompactionChunk) -> _MappedChunk:
+        async def run(index: int, chunk: CompactionChunk) -> _MappedChunk:
             async with semaphore:
-                try:
-                    return _MappedChunk(
-                        chunk,
-                        await self._mapper.summarize(
-                            chunk,
-                            focus=focus,
-                            max_output_tokens=max_output_tokens,
-                        ),
-                    )
-                except Exception as exc:
-                    return _MappedChunk(chunk, None, exc)
+                with trace_scope(compaction_phase='map', compaction_chunk=index,
+                                 compaction_chunk_tokens=chunk.tokens):
+                    return await summarize(chunk)
 
-        return tuple(await asyncio.gather(*(run(chunk) for chunk in chunks)))
+        async def summarize(chunk: CompactionChunk) -> _MappedChunk:
+            try:
+                return _MappedChunk(
+                    chunk,
+                    await self._mapper.summarize(
+                        chunk,
+                        focus=focus,
+                        max_output_tokens=max_output_tokens,
+                    ),
+                )
+            except Exception as exc:
+                return _MappedChunk(chunk, None, exc)
+
+        return tuple(await asyncio.gather(*(run(index, chunk)
+                                           for index, chunk in enumerate(chunks, 1))))
 
     def _assemble(
         self,
@@ -216,23 +251,17 @@ class ConversationHistoryCompactor:
             if item.delta is None
             for turn in item.chunk.turns
         }
+        known_candidate_ids = {
+            turn.turn_id for item in mapped for turn in item.chunk.turns
+        } | retained_ids
         kept = [
             message
             for message in source
             if message.role.value != "system"
             and message.category is not ContextCategory.CHECKPOINT
-            and message.turn_id in (failed_ids | retained_ids)
+            and (message.turn_id in (failed_ids | retained_ids)
+                 or message.turn_id not in known_candidate_ids)
         ]
-        known_candidate_ids = {
-            turn.turn_id for item in mapped for turn in item.chunk.turns
-        } | retained_ids
-        kept.extend(
-            message
-            for message in source
-            if message.role.value != "system"
-            and message.category is not ContextCategory.CHECKPOINT
-            and message.turn_id not in known_candidate_ids
-        )
         return tuple([*systems, checkpoint.to_message(), *kept])
 
     @staticmethod
