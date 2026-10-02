@@ -16,7 +16,7 @@ from codeagent.config import DEFAULT_SYSTEM_PROMPT, AppConfig
 from codeagent.context.compact.base import HistoryCompactor
 from codeagent.context.compact.history_compactor import ConversationHistoryCompactor
 from codeagent.context.manager import ContextManager, ContextPreparationResult
-from codeagent.context.token_estimator import HeuristicTokenEstimator
+from codeagent.context.token_estimator import client_estimator
 from codeagent.evidence.artifact_store import FileArtifactStore
 from codeagent.evidence.jsonl_event_store import JsonlEventStore
 from codeagent.evidence.models import AgentEvent, EventType
@@ -74,6 +74,7 @@ class AgentSession:
             events=self.event_store, session_id=self.session_id,
             costs=config.costs, cost_store=CostStore(config.state_root / 'runs.db'),
             capabilities=config.capabilities if config.capabilities.models else None,
+            calibration=config.calibration,
         )
         llm_client = self.llm_client
         self.artifact_store = FileArtifactStore(config.state_root)
@@ -119,7 +120,6 @@ class AgentSession:
             ),
             metrics=self.metrics,
         )
-        self.estimator = HeuristicTokenEstimator()
         self.registry = ToolRegistry(
             [
                 *default_tools(),
@@ -148,6 +148,8 @@ class AgentSession:
             allowed_tools=self.registry.names(),
             context_profile=config.profile,
         )
+        self.estimator = client_estimator(RoleLlmClient(llm_client, 'worker'),
+                                          self.definition.model_config)
         active_compactor = compactor or ConversationHistoryCompactor(
             llm_client,
             self.estimator,

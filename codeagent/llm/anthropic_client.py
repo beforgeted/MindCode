@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import inspect
 import time
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any, cast
 
 from codeagent.infra.ids import new_llm_call_id
 from codeagent.infra.metrics import (
@@ -139,6 +139,9 @@ class AnthropicLlmClient:
         model_config: ModelConfig,
         tools: Sequence[ToolSpec] = (),
     ) -> int | None:
+        count = getattr(self._client.messages, 'count_tokens', None)
+        if not callable(count):
+            return None
         system, api_messages = _split(messages)
         if not api_messages:
             return 0
@@ -151,12 +154,15 @@ class AnthropicLlmClient:
                 for t in tools
             ]
         try:
-            result = await self._client.messages.count_tokens(
+            result = await cast(Callable[..., Awaitable[Any]], count)(
                 **self._filter(kwargs, self._count_params)
             )
-        except Exception:
-            return None
-        return int(getattr(result, "input_tokens", 0))
+        except Exception as exc:
+            raise LlmError('精确计数请求失败', kind=provider_error_kind(exc)) from exc
+        exact = getattr(result, 'input_tokens', None)
+        if type(exact) is not int:
+            raise LlmError('精确计数响应无有效 input_tokens')
+        return exact
 
 
 def _supported_params(method: Any) -> set[str] | None:

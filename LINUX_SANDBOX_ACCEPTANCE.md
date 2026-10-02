@@ -462,3 +462,23 @@ VM为mengx@192.168.100.128，最终独立目录/home/mengx/mindcode-verification
 .codeagent/validation/vm-verification-failed/保存首轮失败XML与日志；Windows保存windows-verification-full.xml/log及Ruff/Pyright日志。
 没有WSL测试；模型行为均固定模拟，真容器和HTTPS为实际执行，没有新付费模型语义/成本节省实验。
 设计及估算/证据/资源边界见VERIFICATION_INPUT_BUDGET.md。
+
+
+## 2026-10-03 追加：E10按模型校准与边界精确计数
+
+上一阶段已提交340b0f1，本期已验收并随本次提交归档。独立 Ubuntu VM **816 passed、1 skipped**，36 个真容器用例通过；Windows **658 passed、159 skipped**，两端 Ruff/Pyright 通过。
+仅在独立Ubuntu VM mengx@192.168.100.128运行Linux测试，没有使用WSL。
+全新源码目录为/home/mengx/mindcode-calibration.8TUA9q；217份源码/配置/测试/场景逐字节摘要核对。
+新venv通过validation.pth复用原仓库已安装依赖，python -I确认导入全新目录源码；未复制原env或Git元数据。
+受信镜像SHA256 ID仍为0f8a779567c977206c4e1a3985a37fa46cf25d93d767ed93dd866c8670c140a5。
+HTTPS下载fixture仍为iniconfig2.3.0、7484字节、f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12。
+
+专项211通过；全量816通过/1跳过；38项新增校准与2项新增真容器均计入全量。
+真实容器为原34项，加本期局部/全局Verifier精确计数超窗禁止发布2项；14项模拟Podman单元不计入。
+生成及计数结果均用固定Provider或SDK替身，容器、命令、Git worktree和受控HTTPS是真实操作，没有新付费模型实验。
+局部超窗不反思、不回传，全局超窗不推进真实HEAD；最终worktree和容器清理通过。
+原/home/mengx/MindCode的env摘要、Git HEAD/status与历史012 note摘要保持原样；旧失败/成功验收目录保留。
+辅助fixture和audit脚本存放在/home/mengx独立文件，避免纳入被测项目Ruff扫描；准备/运行脚本留在验证目录。
+VM日志与XML、source-manifest.json、original-baseline.json、镜像/运行时/依赖、下载fixture和最终清单已复制到本机.codeagent/validation/vm-calibration。
+Windows全量658通过/159跳过及Ruff/Pyright日志另存windows-calibration-*。
+最终验证后仅更新文档，生产及测试源码没有变化。设计与精度边界见TOKEN_CALIBRATION.md。

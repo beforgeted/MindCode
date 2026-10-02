@@ -58,7 +58,7 @@ Linux 全量 **395 passed, 1 skipped**，Ruff/Pyright 通过，6 个真容器用
 
 ## E. 调参/精度挂账项（低优先，见 `MindCode_实现设计_V1.md §8`）
 
-- [ ] **E10 启用 `CalibratedTokenEstimator` + 校准启发式系数** — 依赖 A1 先把计量接对。
+- [x] **E10 启用 `CalibratedTokenEstimator` + 校准启发式系数（保守一期）** — 按实际模型/协议隔离、边界限频计数、失败保守处理和轨迹已验收；真实偏差/收益评测待做，见 TOKEN_CALIBRATION.md。
 - [ ] **E11 `soft/hard/target` 比例（0.80/0.92/0.55）按 benchmark 调**（现为照文档抄）。
 - [ ] **E12 `ImagePayloadPruner` 接真 vision 描述**（字段已留）。
 - [ ] **E13 `_tests_from()` 测试计数可能漏**（影响 `AgentRunResult.tests` 完整性，不影响正确性）。
@@ -184,3 +184,17 @@ Map真实请求预算与完整turn边界；Reduce滚动有序批次、共享上�
 程序编号覆盖与控制流通过不等于模型语义正确；任意长任务/单块不保证成功，批次不是账单硬预算。
 后续精确计数校准、完整能力/任务特征、真实模型质量与费用评测、硬预算及Phase2/3待做。
 完整设计见VERIFICATION_INPUT_BUDGET.md。
+
+
+2026-10-03 E10保守校准一期完成：
+
+上一阶段已提交340b0f1，本期已验收并随本次提交归档。独立 Ubuntu VM **816 passed、1 skipped**，36 个真容器用例通过；Windows **658 passed、159 skipped**，两端 Ruff/Pyright 通过。
+38项新增校准测试、2项新增真实Podman局部/全局超窗门禁和211项专项计入全量。
+Session与同会话Master共享有限采样预算，各实际Provider/模型/协议类别独立倍率；Message缓存保持原始数值。
+工具声明JSON计入采样基数；Worker裁剪后采样，Map/Reduce、Planner和Verifier预算及候选调用按实际模型校验。
+短请求在同类别采样执行期间也等待并重查；已知超窗不额外计数；取消传播，不支持/失败不当零。
+默认70%边界、2秒、60秒、3次/类别、16次/会话、64类别、128缓存；界限是接口尝试，不是SDK HTTP或金额硬预算。
+高值倍率只上调，不能由固定Provider测试宣称真实偏差、压缩频率或费用改善；轨迹新增独立token_calibrations。
+VM独立目录/home/mengx/mindcode-calibration.8TUA9q，217份文件摘要核验，原仓库/env/Git与历史012不变，容器清单为空。
+E10原属可选低优先级，本期承接窗口适配推进，不构成Phase2/3的硬前置。
+下一项建议受控真实模型质量/成本对照评测准备；E11阈值按实际数据调整，完整能力/任务特征、硬预算、Phase2/3待做。

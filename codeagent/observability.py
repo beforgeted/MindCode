@@ -150,6 +150,8 @@ class JsonTrajectoryExporter:
                               if e.type == EventType.MODEL_BUDGET_ROUTE],
             "capability_routes": [dict(e.payload) for e in selected
                                   if e.type == EventType.MODEL_CAPABILITY_ROUTE],
+            "token_calibrations": [dict(e.payload) for e in selected
+                                   if e.type == EventType.TOKEN_CALIBRATION],
             "model_fallbacks": [dict(e.payload) for e in selected
                                 if e.type == EventType.MODEL_FALLBACK],
             "totals": summarize_calls(calls),

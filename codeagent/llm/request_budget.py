@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from codeagent.context.token_estimator import TokenEstimator
+from codeagent.context.token_estimator import TokenEstimator, estimate_request
 from codeagent.llm.message import Message
 from codeagent.llm.types import LlmResponse, ModelConfig
 
@@ -17,7 +17,7 @@ def check_request(
     *, repair_prompt: str = "",
 ) -> int:
     request = (*messages, Message.user(repair_prompt)) if repair_prompt else messages
-    estimated = estimator.estimate(request)
+    estimated = estimate_request(estimator, request, config)
     if (config.max_output_tokens <= 0
             or estimated + config.max_output_tokens >= config.context_window):
         raise RequestBudgetError(

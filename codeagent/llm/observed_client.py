@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 
+from codeagent.context.token_estimator import ModelTokenEstimator, TokenEstimator, client_estimator
 from codeagent.evidence.event_store import RawEventStore
 from codeagent.evidence.models import AgentEvent, EventType
 from codeagent.infra.ids import new_llm_call_id
@@ -28,6 +29,14 @@ class RoleLlmClient:
     def effective_config(self, model_config: ModelConfig) -> ModelConfig:
         with trace_scope(role=self._role):
             return effective_model_config(self._client, model_config)
+
+    def token_estimator(self, model_config: ModelConfig) -> TokenEstimator:
+        with trace_scope(role=self._role):
+            view = client_estimator(self._client, model_config)
+        if isinstance(view, ModelTokenEstimator):
+            return ModelTokenEstimator(view.owner, model_config,
+                                       resolve=lambda: self.effective_config(model_config))
+        return view
 
     async def chat(
         self, messages: Sequence[Message], *, model_config: ModelConfig,

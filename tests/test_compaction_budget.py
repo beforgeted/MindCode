@@ -153,7 +153,8 @@ async def test_map_uses_serialized_role_window_and_reduce_batches_preserve_state
     reduces = [r for r in provider.requests if r[3] == 'compact_reduce']
     assert len(reduces) > 1
     assert metrics.counters['context.compaction.reduce_batches'] == len(reduces)
-    assert provider.count_calls == 0 and source.messages == original and source.checkpoint is None
+    # Each unsupported provider/model cohort is probed once at the window boundary.
+    assert provider.count_calls == 2 and source.messages == original and source.checkpoint is None
     assert len({r[2]['compaction_id'] for r in provider.requests}) == 1
     estimator = HeuristicTokenEstimator()
     for messages, config, trace, role in provider.requests:
@@ -431,7 +432,11 @@ async def test_reverse_map_completion_still_reduces_in_history_order():
 
 async def test_session_composition_exports_map_reduce_trace_and_preserves_scope(tmp_path):
     _, provider, raw, _ = compose()
-    config = AppConfig(tmp_path, tmp_path / '.state', model='unused', profile=PROFILE)
+    raw.capabilities = CapabilityConfig({
+        **raw.capabilities.models,
+        'a:worker': ModelCapability(200_000, 8_192, True, False, True),
+    })
+    config = AppConfig(tmp_path, tmp_path / '.state', model='a:worker', profile=PROFILE)
     source = history()
     async with AgentSession(config, llm_client=raw) as session:
         with trace_scope(master_run_id='m', session_id=session.session_id, role='worker'):

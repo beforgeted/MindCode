@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 
 from codeagent.agent.models import AgentRunResult, RunStatus
 from codeagent.agent.run import AgentRun
-from codeagent.context.token_estimator import HeuristicTokenEstimator, TokenEstimator
+from codeagent.context.token_estimator import TokenEstimator, client_estimator
 from codeagent.infra.trace import trace_scope
 from codeagent.llm.client import LlmClient, effective_model_config
 from codeagent.llm.message import Message
@@ -72,7 +72,7 @@ class LlmLocalVerifier:
     ) -> None:
         self._client = client
         self._model_config = model_config
-        self._estimator = estimator or HeuristicTokenEstimator()
+        self._estimator = estimator or client_estimator(client, model_config)
 
     async def verify(self, run: AgentRun, result: AgentRunResult) -> VerificationResult:
         if not result.ok:

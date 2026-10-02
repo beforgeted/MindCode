@@ -11,7 +11,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from codeagent.context.token_estimator import HeuristicTokenEstimator, TokenEstimator
+from codeagent.context.token_estimator import TokenEstimator, client_estimator
 from codeagent.infra.trace import trace_scope
 from codeagent.llm.client import LlmClient, LlmError, LlmErrorKind, effective_model_config
 from codeagent.llm.message import Message
@@ -80,7 +80,7 @@ class LlmPlanner:
         self._model_config = model_config
         self._default_agent_id = default_agent_id
         self._max_repair_retries = max(0, max_repair_retries)
-        self._estimator = estimator or HeuristicTokenEstimator()
+        self._estimator = estimator or client_estimator(client, model_config)
 
     async def plan(self, task: str) -> TaskGraph:
         messages = [Message.system(_SYSTEM), Message.user(task)]

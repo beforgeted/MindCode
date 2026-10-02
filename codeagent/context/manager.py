@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 
 from codeagent.context.budget import ContextBudgetPrediction, ContextBudgetPredictor
@@ -36,10 +36,15 @@ from codeagent.context.history.turn import TurnIdPartitioner, TurnPartitioner
 from codeagent.context.profile import ContextProfile
 from codeagent.context.prune.image_pruner import ImagePayloadPruner
 from codeagent.context.prune.tool_result_offloader import ToolResultOffloader
-from codeagent.context.token_estimator import HeuristicTokenEstimator, TokenEstimator
+from codeagent.context.token_estimator import (
+    HeuristicTokenEstimator,
+    TokenEstimator,
+    estimator_for_model,
+)
 from codeagent.infra import metrics as M
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.message import ContextCategory, Message, Role
+from codeagent.llm.types import ModelConfig, ToolSpec
 from codeagent.memory.models import MemoryItem, MemorySource, MemoryType
 from codeagent.memory.retriever import MemoryRetriever, NullMemoryRetriever, RankedMemory
 
@@ -105,6 +110,9 @@ class ContextManager:
         focus: str | None = None,
         memory_type_filter: tuple[MemoryType, ...] | None = None,
         memory_injection_cap: int | None = None,
+        model_config: ModelConfig | None = None,
+        tools: Sequence[ToolSpec] = (),
+        token_sampler: Callable[[Sequence[Message]], Awaitable[int | None]] | None = None,
     ) -> ContextPreparationResult:
         with self.metrics.timer(M.CONTEXT_PREPARE_MS):
             return await self._prepare(
@@ -114,6 +122,9 @@ class ContextManager:
                 focus=focus,
                 memory_type_filter=memory_type_filter,
                 memory_injection_cap=memory_injection_cap,
+                model_config=model_config,
+                tools=tools,
+                token_sampler=token_sampler,
             )
 
     async def _prepare(
@@ -125,9 +136,14 @@ class ContextManager:
         focus: str | None,
         memory_type_filter: tuple[MemoryType, ...] | None = None,
         memory_injection_cap: int | None = None,
+        model_config: ModelConfig | None = None,
+        tools: Sequence[ToolSpec] = (),
+        token_sampler: Callable[[Sequence[Message]], Awaitable[int | None]] | None = None,
     ) -> ContextPreparationResult:
+        estimator = (estimator_for_model(self.estimator, model_config, tools)
+                     if model_config is not None else self.estimator)
         messages = history.snapshot()
-        tokens_before = self.estimator.estimate(messages)
+        tokens_before = estimator.estimate(messages)
         self.metrics.gauge(M.CONTEXT_TOKENS_BEFORE, tokens_before)
 
         turns = self.partitioner.partition(messages, statuses=history.turn_statuses)
@@ -144,7 +160,11 @@ class ContextManager:
         )
         messages = list(tool_outcome.messages)
 
-        tokens_after_prune = self.estimator.estimate(messages)
+        # Sample only the request after deterministic payload pruning, before deciding to compact.
+        if token_sampler is not None:
+            await token_sampler(messages)
+
+        tokens_after_prune = estimator.estimate(messages)
         self.metrics.gauge(M.CONTEXT_TOKENS_AFTER_PRUNE, tokens_after_prune)
         self.metrics.incr(M.CONTEXT_IMAGE_TOKENS_REMOVED, image_outcome.tokens_removed)
         self.metrics.incr(M.CONTEXT_TOOL_TOKENS_REMOVED, tool_outcome.tokens_removed)
@@ -168,14 +188,14 @@ class ContextManager:
                     turn_statuses=history.turn_statuses,
                 )
             if compaction.compacted and compaction.checkpoint is not None:
-                candidate_tokens = self.estimator.estimate(compaction.messages)
+                candidate_tokens = estimator.estimate(compaction.messages)
                 if candidate_tokens <= profile.hard_trigger:
                     history.apply_compaction(compaction.messages, compaction.checkpoint)
                     messages = list(compaction.messages)
                     self.metrics.incr(M.CONTEXT_COMPACTION_COUNT)
                     self.metrics.gauge(
                         M.CONTEXT_CHECKPOINT_TOKENS,
-                        self.estimator.estimate_message(compaction.checkpoint.to_message()),
+                        estimator.estimate_message(compaction.checkpoint.to_message()),
                     )
                 else:
                     compaction = CompactionResult(
@@ -195,7 +215,7 @@ class ContextManager:
                 self.metrics.incr(M.CONTEXT_COMPACTION_SKIPPED)
 
         # ⑥⑦ Memory 注入：仅存在于本次 request，不写回 History。
-        memory_budget = _memory_budget(self.estimator.estimate(messages), profile)
+        memory_budget = _memory_budget(estimator.estimate(messages), profile)
         if memory_injection_cap is not None:
             # MemoryProfile.max_injection_tokens 收紧上限（P6）
             memory_budget = min(memory_budget, max(0, memory_injection_cap))
@@ -219,11 +239,11 @@ class ContextManager:
                     ranked,
                     memory_budget,
                     profile.memory_selected_limit,
-                    self.estimator,
+                    estimator,
                 )
                 if memory_message is not None:
                     messages.insert(insertion, memory_message)
-                    memory_tokens = self.estimator.estimate_message(memory_message)
+                    memory_tokens = estimator.estimate_message(memory_message)
                 self.metrics.incr(M.MEMORY_CANDIDATES, memory_candidates)
                 self.metrics.incr(M.MEMORY_SELECTED, memory_selected)
                 self.metrics.incr(M.MEMORY_TOKENS, memory_tokens)
@@ -234,7 +254,7 @@ class ContextManager:
                 memory_degraded_reason = f"Memory retrieval 失败，已跳过: {type(exc).__name__}"
                 self.metrics.incr(M.MEMORY_RETRIEVAL_FAILURES)
 
-        tokens_final = self.estimator.estimate(messages)
+        tokens_final = estimator.estimate(messages)
         self.metrics.gauge(M.CONTEXT_TOKENS_AFTER_COMPACT, tokens_final)
 
         # ⑨ hard limit 校验
@@ -251,7 +271,7 @@ class ContextManager:
         return ContextPreparationResult(
             messages=tuple(messages),
             prediction=prediction,
-            breakdown=self.breakdown(messages),
+            breakdown=self.breakdown(messages, estimator=estimator),
             compaction=compaction,
             tokens_before=tokens_before,
             tokens_after_prune=tokens_after_prune,
@@ -265,11 +285,12 @@ class ContextManager:
             memory_degraded_reason=memory_degraded_reason,
         )
 
-    def breakdown(self, messages: list[Message]) -> dict[ContextCategory, int]:
+    def breakdown(self, messages: list[Message], *,
+                  estimator: TokenEstimator | None = None) -> dict[ContextCategory, int]:
         """`/context` 的分项占用。靠 Message.category 归因，所以那个字段是 P0 就要有的。"""
         out: dict[ContextCategory, int] = {}
         for message in messages:
-            tokens = self.estimator.estimate_message(message)
+            tokens = (estimator or self.estimator).estimate_message(message)
             out[message.category] = out.get(message.category, 0) + tokens
         return out
 

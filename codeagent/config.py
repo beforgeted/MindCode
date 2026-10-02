@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from codeagent.context.calibration_config import CalibrationConfig
 from codeagent.context.profile import ContextProfile
 from codeagent.execution.download import DownloadPolicy
 from codeagent.execution.models import ExecutionLimits
@@ -54,6 +55,7 @@ class AppConfig:
     costs: CostConfig = field(default_factory=CostConfig)
     capabilities: CapabilityConfig = field(default_factory=CapabilityConfig)
     verification: VerificationLimits = field(default_factory=VerificationLimits)
+    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     execution_backend: str = "local"
     sandbox_image: str | None = None
     sandbox_limits: ExecutionLimits = field(default_factory=ExecutionLimits)
@@ -112,6 +114,12 @@ class AppConfig:
             models=ModelRoutingConfig.from_env(),
             costs=CostConfig.from_env(),
             capabilities=CapabilityConfig.from_env(),
+            calibration=CalibrationConfig(
+                enabled=os.environ.get('CODEAGENT_TOKEN_CALIBRATION', '1') != '0',
+                timeout_seconds=_env_int('CODEAGENT_TOKEN_COUNT_TIMEOUT_SECONDS', 2),
+                min_interval_seconds=_env_int('CODEAGENT_TOKEN_COUNT_INTERVAL_SECONDS', 60),
+                max_total_calls=_env_int('CODEAGENT_TOKEN_COUNT_MAX_CALLS', 16),
+            ),
             verification=VerificationLimits(
                 max_batches=_env_int("CODEAGENT_VERIFICATION_MAX_BATCHES", 32),
                 timeout_seconds=_env_int("CODEAGENT_VERIFICATION_TIMEOUT_SECONDS", 120),

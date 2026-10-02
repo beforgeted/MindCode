@@ -10,7 +10,7 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback；R1二期显式定价、持久化成本与Worker阈值降级也已实现。
 **B4/B5 沙箱**已接入 Git / 非 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
 离线执行与受校验快照回传。B5 一期新增受控 HTTPS 文件下载，容器仍断网。C6 同 run 跨进程恢复互斥、
-非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **776 passed、1 skipped**，34 个真容器用例通过；Windows **620 passed、157 skipped**，两端 Ruff/Pyright 通过。
+非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **816 passed、1 skipped**，36 个真容器用例通过；Windows **658 passed、159 skipped**，两端 Ruff/Pyright 通过。
 真实 deepseek-flash 历史11场景和非Git任务正/负例通过是此前阶段的模型回归；本期恢复测试用Stub固定
 模型步骤，容器与进程强杀是真实操作，下载回归使用真实HTTPS。
 详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
@@ -448,3 +448,16 @@ Planner按有效角色模型预算完整请求，任务超限明确停止；原�
 首轮VM全量发现二进制一律拒绝挡住下载SHA256验收，日志和现场保留；修正后全量774/1通过，再补路径字面量与规划取消边界，最终新目录完整复验。
 设计见[VERIFICATION_INPUT_BUDGET.md](VERIFICATION_INPUT_BUDGET.md)。上一阶段c56ebfa，本期已验收并随本次提交归档。
 模型判定使用固定Provider，没有新增付费模型质量/费用评测；后续精确计数校准、完整能力、任务特征、硬预算与真实模型评测待做。
+
+
+### E10：按模型校准与边界计数（2026-10-03）
+
+独立 Ubuntu VM **816 passed、1 skipped**，36 个真容器用例通过；Windows **658 passed、159 skipped**，两端 Ruff/Pyright 通过。新增38项校准测试、2项真实容器发布门禁，VM专项211项计入全量。
+默认会话启用按实际Provider/模型和文本/工具/图片协议类别隔离的保守倍率；工具JSON进入校准基数。
+Worker在裁剪后、压缩决策前限频采样，各角色的完整请求预算及实际候选生成前检查共享状态。
+70%窗口边界采样，默认每类别3次、每会话16次、间隔60秒、超时2秒；相同完整输入使用摘要缓存。
+并发等待正在执行的同类别采样后重查预算；取消向上传播，不支持/无效/失败保留原估算或已有倍率。
+轨迹JSON新增token_calibrations，不混入生成用量或据此推断计数费用为零。
+本期倍率只上调，不证明所有输入不超窗，也未证明减少压缩或费用；没有新增付费模型实验。
+设计见[TOKEN_CALIBRATION.md](TOKEN_CALIBRATION.md)。上一阶段已提交340b0f1，本期已验收并随本次提交归档。
+后续优先做受控真实模型质量/费用对照，再据证据调整倍率和压缩阈值；完整任务特征、硬预算与Phase2/3继续按原计划推进。

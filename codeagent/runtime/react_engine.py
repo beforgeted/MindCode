@@ -13,6 +13,7 @@ tool 协议约束：一个 assistant turn 的**全部** tool_result 必须放进
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import partial
 
 from codeagent.agent.models import (
     AgentRunResult,
@@ -30,7 +31,7 @@ from codeagent.infra import metrics as M
 from codeagent.infra.metrics import Metrics
 from codeagent.infra.text import extract_test_counts
 from codeagent.infra.trace import trace_scope
-from codeagent.llm.client import LlmClient
+from codeagent.llm.client import LlmClient, effective_model_config
 from codeagent.llm.message import Message, TextBlock, ToolResultBlock
 from codeagent.llm.routing import RoutingLlmClient
 from codeagent.tool.execution_manager import ExecutionScope, ToolExecutionManager
@@ -85,13 +86,19 @@ class ReActEngine:
 
             mprofile = run.definition.memory_profile
             profile = run.profile
+            sampler = None
             if isinstance(self._llm, RoutingLlmClient):
                 profile = self._llm.context_profile(run.definition.model_config, profile, specs)
+                sampler = partial(self._llm.sample_tokens,
+                                  model_config=run.definition.model_config, tools=specs)
             prepared = await self._context.prepare(
                 run.history,
                 profile,
                 memory_type_filter=mprofile.readable_types or None,
                 memory_injection_cap=mprofile.max_injection_tokens,
+                model_config=effective_model_config(self._llm, run.definition.model_config),
+                tools=specs,
+                token_sampler=sampler,
             )
             run.context.last_prepared = prepared
             response = await self._llm.chat(

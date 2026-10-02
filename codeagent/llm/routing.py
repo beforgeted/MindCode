@@ -8,8 +8,14 @@ from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
+from codeagent.context.calibration_config import CalibrationConfig
 from codeagent.context.profile import ContextProfile
-from codeagent.context.token_estimator import HeuristicTokenEstimator, estimate_text
+from codeagent.context.token_estimator import (
+    CalibratedTokenEstimator,
+    ModelTokenEstimator,
+    estimate_request,
+    estimate_tools,
+)
 from codeagent.evidence.event_store import RawEventStore
 from codeagent.evidence.models import AgentEvent, EventType
 from codeagent.infra.ids import new_id
@@ -123,6 +129,8 @@ class RoutingLlmClient:
         session_id: str = "",
         costs: CostConfig | None = None, cost_store: CostStore | None = None,
         capabilities: CapabilityConfig | None = None,
+        calibration: CalibrationConfig | None = None,
+        token_estimator: CalibratedTokenEstimator | None = None,
     ) -> None:
         self.providers = dict(providers)
         self.router = router
@@ -132,6 +140,10 @@ class RoutingLlmClient:
         self.costs = costs or CostConfig()
         self.cost_store = cost_store
         self.capabilities = capabilities or CapabilityConfig()
+        self.calibration = token_estimator or CalibratedTokenEstimator(
+            self, config=calibration, record=self._record_calibration,
+        )
+        self.calibration._record = self._record_calibration
         # A price book and capability catalog may not disagree about the same limit.
         for name, capability in self.capabilities.models.items():
             price = self.costs.prices.get(name)
@@ -143,7 +155,37 @@ class RoutingLlmClient:
 
     @staticmethod
     def _tool_tokens(tools: Sequence[ToolSpec]) -> int:
-        return sum(estimate_text(repr((t.name, t.description, t.input_schema))) for t in tools)
+        return estimate_tools(tools)
+
+    def token_estimator(self, model_config: ModelConfig) -> ModelTokenEstimator:
+        return ModelTokenEstimator(self.calibration, model_config,
+                                   resolve=lambda: self.effective_config(model_config))
+
+    def _record_calibration(self, payload: dict) -> None:
+        if self._metrics is not None:
+            self._metrics.incr('tokens.count.attempts')
+            self._metrics.incr(f'tokens.count.{payload["status"]}')
+            self._metrics.gauge('tokens.calibration.scale', payload['scale'])
+        if self._events is not None:
+            self._events.append_nowait(AgentEvent(
+                EventType.TOKEN_CALIBRATION,
+                str(current_trace().get('session_id', self._session_id)),
+                payload={**payload, 'trace': current_trace()},
+            ))
+
+    async def sample_tokens(self, messages: Sequence[Message], *, model_config: ModelConfig,
+                            tools: Sequence[ToolSpec] = ()) -> int | None:
+        config = self.router.resolve(self._role(), base=model_config)
+        provider, client, effective = self._target(config)
+        return await self.calibration.sample(
+            messages, model_config=replace(effective, model=f'{provider}:{effective.model}'),
+            tools=tools, client=client, count_config=effective,
+        )
+
+    def _estimate(self, target, messages, tools) -> int:
+        provider, _, config = target
+        return estimate_request(self.calibration, messages,
+                                replace(config, model=f'{provider}:{config.model}'), tools)
 
     def effective_config(self, model_config: ModelConfig) -> ModelConfig:
         """Resolve the current role's primary limits without network requests or billing."""
@@ -162,7 +204,9 @@ class RoutingLlmClient:
         if tools and not self.capabilities.models[f'{provider}:{effective.model}'].tools:
             raise LlmError('主模型不支持工具声明', kind=LlmErrorKind.INVALID_REQUEST)
         window = min(profile.context_window, effective.context_window)
-        capacity = window - effective.max_output_tokens - self._tool_tokens(tools)
+        capacity = window - effective.max_output_tokens - self.calibration.for_model(
+            replace(effective, model=f'{provider}:{effective.model}'), tools,
+        ).estimate_tools(tools)
         if capacity <= 0:
             raise LlmError('模型窗口无法容纳输出预留和工具声明', kind=LlmErrorKind.CONTEXT_LIMIT)
         return replace(profile, context_window=capacity,
@@ -183,7 +227,7 @@ class RoutingLlmClient:
             isinstance(b, ImageBlock) and b.data is not None for m in messages for b in m.blocks
         ):
             return 'images_unsupported'
-        if (HeuristicTokenEstimator().estimate(messages) + self._tool_tokens(tools)
+        if (self._estimate(target, messages, tools)
                 + config.max_output_tokens >= config.context_window):
             return 'context_too_small'
         return None
@@ -221,9 +265,12 @@ class RoutingLlmClient:
         price = self.costs.prices[self.costs.economy_worker]
         assert price.context_window is not None and price.max_output_tokens is not None
         primary = targets[0][2]
-        estimated = HeuristicTokenEstimator().estimate(messages) + self._tool_tokens(tools)
         output_limit = min(primary.max_output_tokens, price.max_output_tokens)
         context_limit = min(primary.context_window, price.context_window)
+        estimate_target = self._target(replace(primary, model=self.costs.economy_worker,
+                                              context_window=context_limit,
+                                              max_output_tokens=output_limit))
+        estimated = self._estimate(estimate_target, messages, tools)
         reason = 'cost_unknown' if unknown else 'cost_threshold'
         if tools and not price.tools:
             reason = 'economy_tools_unsupported'
@@ -316,6 +363,17 @@ class RoutingLlmClient:
                 if self.capabilities.models:
                     self._record_capability((provider, client, config), 'selected')
                 try:
+                    qualified = replace(config, model=f'{provider}:{config.model}')
+                    exact = await self.calibration.sample(
+                        messages, model_config=qualified, tools=tools,
+                        client=client, count_config=config,
+                    )
+                    estimated = self._estimate((provider, client, config), messages, tools)
+                    if (self.calibration.config.enabled and
+                            max(estimated, exact or 0) + config.max_output_tokens
+                            >= config.context_window):
+                        raise LlmError('校准后的完整请求超过模型窗口',
+                                       kind=LlmErrorKind.CONTEXT_LIMIT)
                     return await client.chat(messages, model_config=config, tools=tools)
                 except LlmError as exc:
                     if exc.kind not in _RECOVERABLE or index + 1 == len(targets):
@@ -353,6 +411,7 @@ def attach_routing(
     events: RawEventStore, session_id: str,
     costs: CostConfig | None = None, cost_store: CostStore | None = None,
     capabilities: CapabilityConfig | None = None,
+    calibration: CalibrationConfig | None = None,
 ) -> RoutingLlmClient:
     if isinstance(client, RoutingLlmClient):
         providers, default_provider = client.providers, client.default_provider
@@ -364,9 +423,17 @@ def attach_routing(
         costs, cost_store = client.costs, client.cost_store
     if capabilities is None and isinstance(client, RoutingLlmClient):
         capabilities = client.capabilities
+    shared_estimator = None
+    if isinstance(client, RoutingLlmClient):
+        if calibration is None:
+            calibration = client.calibration.config
+        if (calibration == client.calibration.config
+                and client._events is events and client._metrics is metrics):
+            shared_estimator = client.calibration
     observed = {key: ObservedLlmClient(value, metrics=metrics, events=events, session_id=session_id,
                                      costs=costs, cost_store=cost_store)
                 for key, value in providers.items()}
     return RoutingLlmClient(observed, router, default_provider=default_provider,
                             metrics=metrics, events=events, session_id=session_id,
-                            costs=costs, cost_store=cost_store, capabilities=capabilities)
+                            costs=costs, cost_store=cost_store, capabilities=capabilities,
+                            calibration=calibration, token_estimator=shared_estimator)

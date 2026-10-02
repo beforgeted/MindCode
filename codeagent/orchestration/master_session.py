@@ -83,6 +83,7 @@ async def build_master(
         llm_client, config.models, metrics=metrics, events=event_store, session_id="",
         costs=config.costs, cost_store=CostStore(config.state_root / 'runs.db'),
         capabilities=config.capabilities if config.capabilities.models else None,
+        calibration=config.calibration,
     )
     sandbox = None
     if config.execution_backend == "podman":
@@ -205,7 +206,7 @@ class MasterSession:
         try:
             self.master = await build_master(
                 config=self._config,
-                llm_client=self._llm,
+                llm_client=self.session.llm_client,
                 engine=self.session.engine,
                 event_store=self.session.event_store,
                 metrics=self.session.metrics,

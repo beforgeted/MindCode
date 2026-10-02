@@ -26,6 +26,7 @@ class EventType(StrEnum):
     MODEL_FALLBACK = "model_fallback"
     MODEL_BUDGET_ROUTE = "model_budget_route"
     MODEL_CAPABILITY_ROUTE = "model_capability_route"
+    TOKEN_CALIBRATION = "token_calibration"
     NETWORK_DOWNLOAD = "network_download"
     USER_MESSAGE = "user_message"
     ASSISTANT_MESSAGE = "assistant_message"
