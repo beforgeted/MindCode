@@ -16,6 +16,7 @@ class SandboxUnavailable(SandboxError):
 class ExecutionPurpose(StrEnum):
     WORKER = "worker"
     VALIDATION = "validation"
+    INTERACTIVE = "interactive"
     INTERACTIVE_READONLY = "interactive_readonly"
 
 

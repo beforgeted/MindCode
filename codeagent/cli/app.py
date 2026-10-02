@@ -19,6 +19,7 @@ from codeagent.cli.memory import handle_memory_command
 from codeagent.cli.report import render_context_report
 from codeagent.config import AppConfig
 from codeagent.context.manager import ContextOverflowError
+from codeagent.execution.models import SandboxError
 from codeagent.llm.stub_client import StubLlmClient
 from codeagent.session import AgentSession
 
@@ -215,6 +216,9 @@ async def run_repl(config: AppConfig) -> int:
                 result = await session.send(line)
             except ContextOverflowError as exc:
                 print(f"\n[上下文溢出] {exc}\n")
+                continue
+            except SandboxError as exc:
+                print(f"\n[隔离交互不可用] {exc}\n")
                 continue
             except KeyboardInterrupt:
                 session.run.cancellation.cancel()

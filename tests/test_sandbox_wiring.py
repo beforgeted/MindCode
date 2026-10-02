@@ -183,7 +183,7 @@ async def test_missing_domain_and_custom_tools_cannot_fall_back_to_host(wiring):
         )
         assert "没有绑定" in outcome.results[0].content
         assert not (config.workspace_root / "host.txt").exists()
-        with pytest.raises(SandboxError, match="/task"):
+        with pytest.raises(SandboxError, match="Git"):
             await session.send("edit")
         handle = await manager.open(TreeSnapshot(()))
         session.registry._tools["write_file"] = Custom()

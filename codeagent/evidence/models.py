@@ -30,6 +30,7 @@ class EventType(StrEnum):
     TOOL_RESULT = "tool_result"
     AGENT_RUN_STARTED = "agent_run_started"
     AGENT_RUN_FINISHED = "agent_run_finished"
+    SANDBOX_TURN_FINISHED = "sandbox_turn_finished"
     TURN_STARTED = "turn_started"
     TURN_FINISHED = "turn_finished"
     CONTEXT_PREPARED = "context_prepared"

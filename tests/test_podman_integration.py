@@ -257,3 +257,45 @@ asyncio.run(main())
         await child.wait()
         await recovery.aclose()
         await live.aclose()
+
+
+@pytest.mark.parametrize("accept", [True, False], ids=["promote", "reject"])
+async def test_real_interactive_multiturn_publication_and_rejection(image, tmp_path, accept):
+    from dataclasses import replace
+
+    from codeagent.llm.stub_client import StubLlmClient
+    from codeagent.session import AgentSession
+    from tests.test_master_integration import _config, _git_out, _init_repo, _worktree_count
+
+    _init_repo(tmp_path)
+    original = _git_out(tmp_path, "rev-parse", "HEAD")
+    config = replace(_config(tmp_path), execution_backend="podman", sandbox_image=image,
+                     verify_command="test $(cat note.txt) = interactive" if accept else "false")
+    client = StubLlmClient([
+        [("write_file", {"path": "note.txt", "content": "interactive"})],
+        [("run_command", {"command": "cat note.txt"})], "done",
+        [("read_file", {"path": "note.txt" if accept else "seed.txt"})], "read done",
+        "new context",
+    ])
+    async with AgentSession(config, llm_client=client) as session:
+        first = await session.send("write note")
+        assert first.ok is accept
+        assert _worktree_count(tmp_path) == 1
+        run = session.run
+        length = len(run.history)
+        if accept:
+            assert (tmp_path / "note.txt").read_text() == "interactive"
+            assert _git_out(tmp_path, "rev-parse", "HEAD") != original
+        else:
+            assert not (tmp_path / "note.txt").exists()
+            assert _git_out(tmp_path, "rev-parse", "HEAD") == original
+            assert not first.files
+        assert (await session.send("read actual files")).ok
+        assert session.run is run and len(run.history) > length
+        assert _worktree_count(tmp_path) == 1
+        assert session._interactive is not None and not session._interactive.manager._handles
+        session.clear()
+        assert session.run is not run
+        assert (await session.send("hello")).ok
+        assert _worktree_count(tmp_path) == 1
+        assert not session._interactive.manager._handles

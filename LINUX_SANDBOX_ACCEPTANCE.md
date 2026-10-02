@@ -129,3 +129,26 @@ WSL 追加回归与首轮失败记录为 `.codeagent/validation/recovery-*`。
 
 最终修复补充：内核校验失败后，确认删除资源时同步移除内存句柄，避免随后 aclose 误查已删除容器。
 新增异常回归纳入 VM 全量415 / 1；WSL2此前全量414 / 1，最终账本专项18 passed与静态检查通过。
+
+## 2026-10-02 追加：Git 普通单 Agent 交互
+
+已先提交恢复与路由基线 `645afdc`。本轮在独立 Ubuntu VM `mengx@192.168.100.128` 的
+`/home/mengx/mindcode-interactive-validation.09tZaZ` 验收；未调用 WSL，原仓库与历史失败现场保持原样。
+179 个源码 / 测试文件逐一核对 SHA256；复用已有受信镜像 ID 与只读依赖路径，验证子进程加载新源码。
+
+独立 VM 全量 **428 passed、1 skipped**（150.22秒），Ruff / Pyright通过，10个真容器用例通过。
+Windows356 / 73，静态检查通过。交互与工具门禁专项23项通过，包含在全量内，不相加。
+真实 `run_repl` 另做确定性输入与真实容器冒烟：写answer.txt=42、下一轮读取、/clear、普通输入、/quit；
+项目成果正确，只剩base工作树，最终容器清单为空。这里使用Stub固定模型输出，不声称历史真实模型套件已复验。
+
+每轮候选隔离 → INTERACTIVE容器 → 成功封存 / 销毁 → 私有候选回写 → Git候选提交 → 独立VALIDATION容器
+→ 再次核对工作区状态与HEAD → CAS合并。验收容器修改不回传。无改动的轮次不提交，不强求验收命令。
+写轮次缺验收命令、验收失败、取消或清理异常均不发布；返回失败时不把隔离写入列为已发布文件。
+会话保留history；每轮预算重置，取消后可继续；任务级取消补齐未返回的tool_result，关闭当前turn。
+`sandbox_turn_finished`记录事务最终结果，区别于ReAct模型回复完成。会话send串行化，执行期间拒绝clear。
+
+边界：当前要求干净Git根工作区，成功写轮次会自动提交并合并；非Git、用户未提交改动的交互支持待做。
+没有同run跨进程恢复互斥、后台回收守护服务或联网白名单。跨进程账本保护的是资源归属，不替代这些能力。
+证据 `.codeagent/validation/vm-interactive/`：vm-full.xml/log、vm-unit.xml/log、vm-ruff.log、vm-pyright.log、
+vm-exit-codes.json、source-manifest.json、vm-cli-smoke.json/log、vm-containers-before/after.json及运行环境文件。
+本轮新改动尚未提交，后续文档更新不属于被测源码清单。

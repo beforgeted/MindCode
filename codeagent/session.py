@@ -6,9 +6,11 @@ P0-P3 的 Evidence、工具治理、History Compaction 与 PROJECT Durable Memor
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from types import TracebackType
 
-from codeagent.agent.models import AgentDefinition, AgentRunResult
+from codeagent.agent.models import AgentDefinition, AgentRunResult, RunStatus
 from codeagent.agent.run import AgentRun
 from codeagent.config import DEFAULT_SYSTEM_PROMPT, AppConfig
 from codeagent.context.compact.base import HistoryCompactor
@@ -17,7 +19,9 @@ from codeagent.context.manager import ContextManager, ContextPreparationResult
 from codeagent.context.token_estimator import HeuristicTokenEstimator
 from codeagent.evidence.artifact_store import FileArtifactStore
 from codeagent.evidence.jsonl_event_store import JsonlEventStore
-from codeagent.execution.models import SandboxUnavailable
+from codeagent.evidence.models import AgentEvent, EventType
+from codeagent.execution.podman import PodmanSandboxManager
+from codeagent.infra.cancellation import CancellationToken
 from codeagent.infra.ids import new_session_id
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
@@ -32,6 +36,7 @@ from codeagent.memory.models import MemorySource
 from codeagent.memory.retriever import KeywordMemoryRetriever
 from codeagent.memory.service import MemoryService
 from codeagent.memory.sqlite_store import SqliteMemoryStore
+from codeagent.runtime.interactive_sandbox import InteractiveSandbox
 from codeagent.runtime.react_engine import ReActEngine
 from codeagent.tool.approval import DenyExternalApprovalPolicy, InteractiveApprovalPolicy
 from codeagent.tool.builtin import default_tools
@@ -55,6 +60,9 @@ class AgentSession:
         session_id: str | None = None,
     ) -> None:
         self.config = config
+        self._send_lock = asyncio.Lock()
+        self._closed = False
+        self._interactive: InteractiveSandbox | None = None
         self.session_id = session_id or new_session_id()
         self.metrics = Metrics()
         self.event_store = JsonlEventStore(config.state_root)
@@ -180,7 +188,9 @@ class AgentSession:
         )
         # 交互模式下单 Agent 会话允许外部副作用（交 InteractiveApprovalPolicy 询问用户）；
         # 非交互默认 False，外部副作用被拦成 DeferredAction（不变式 2）。
-        run.allow_external_effects = self.config.interactive_approval
+        run.allow_external_effects = (
+            self.config.interactive_approval and self.config.execution_backend != "podman"
+        )
         return run
 
     async def __aenter__(self) -> AgentSession:
@@ -203,10 +213,20 @@ class AgentSession:
         await self.aclose()
 
     async def aclose(self) -> None:
-        if self.memory_service.available:
-            await self.run_governance()
-            await self.memory_service.aclose()
-        await self.event_store.aclose()
+        async with self._send_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                if self._interactive is not None:
+                    await self._interactive.manager.aclose()
+            finally:
+                try:
+                    if self.memory_service.available:
+                        await self.run_governance()
+                        await self.memory_service.aclose()
+                finally:
+                    await self.event_store.aclose()
 
     async def run_governance(self) -> str:
         """Session End 记忆治理（记忆 V2 §44）：抽取 → Judge → 去重/冲突 → 落库 → 刷新索引。
@@ -229,9 +249,32 @@ class AgentSession:
             return f"[治理失败，已跳过] {type(exc).__name__}: {exc}"
 
     async def send(self, user_input: str) -> AgentRunResult:
-        if self.config.execution_backend == "podman":
-            raise SandboxUnavailable("Podman 当前支持 /task；单 Agent 交互入口尚未接入")
-        return await self.engine.run_turn(self.run, user_input)
+        async with self._send_lock:
+            if self._closed:
+                raise RuntimeError("会话已关闭")
+            if self.config.execution_backend != "podman":
+                return await self.engine.run_turn(self.run, user_input)
+            if self._interactive is None or self._interactive.manager._closed:
+                assert self.config.sandbox_image is not None
+                manager = PodmanSandboxManager(
+                    self.config.sandbox_image, limits=self.config.sandbox_limits,
+                    ledger_directory=self.config.state_root / "sandbox" /
+                    hashlib.sha256(self.config.effective_project_id.encode()).hexdigest()[:24],
+                    project_id=self.config.effective_project_id,
+                )
+                self._interactive = InteractiveSandbox(self.config, manager)
+            # Keep history across turns; iteration budget and completed cancellation
+            # belong to each conversational turn rather than the whole session.
+            self.run.context.react_iteration = 0
+            if self.run.status == RunStatus.CANCELLED:
+                self.run.cancellation = CancellationToken()
+            result = await self._interactive.send(self.run, self.engine, user_input)
+            self.event_store.append_nowait(AgentEvent(
+                type=EventType.SANDBOX_TURN_FINISHED, session_id=self.session_id,
+                agent_run_id=self.run.run_id,
+                payload={"status": str(result.status), "error": result.error},
+            ))
+            return result
 
     @property
     def last_prepared(self) -> ContextPreparationResult | None:
@@ -244,6 +287,8 @@ class AgentSession:
         Raw Events 保留，Durable Memory（P3）也不受影响。
         Clear Context != Forget Memory。
         """
+        if self._send_lock.locked():
+            raise RuntimeError("执行期间不能清空会话")
         self.run = self._new_run()
 
     @property

@@ -8,8 +8,8 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 收尾接线 **A1 / A3 / C7 / A2** 已实现：会话计量、交互审批、Worker 记忆候选抽取与延后外部动作恢复。
 优化 **O1** 已实现：角色/模型调用归因、Attempt 状态历史与任务轨迹 JSON 导出。
 优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback（金额预算路由待做）。
-**B4/B5 沙箱第一期**已接入 `/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
-离线执行与受校验快照回传。独立 Ubuntu VM 追加验收 **415 passed、1 skipped**，8 个真容器用例通过；
+**B4/B5 沙箱**已接入 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
+离线执行与受校验快照回传。独立 Ubuntu VM 最新验收 **428 passed、1 skipped**，10 个真容器用例通过；
 详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
 
 ## 快速开始
@@ -205,7 +205,7 @@ export CODEAGENT_EXECUTION_BACKEND=podman
 export CODEAGENT_SANDBOX_IMAGE='<已安装的完整 SHA256 镜像 ID>'
 export CODEAGENT_VERIFY_CMD='python -m pytest -q'
 python -m codeagent.cli.app --workspace /path/to/git-repo
-# 在 REPL 中使用 /task <目标>
+# 在 REPL 中直接输入目标，或使用 /task <目标>
 ```
 
 每次 Worker（包括 reflection）拥有一个独立容器。`read_file` / `write_file` / `grep` 和
@@ -225,7 +225,14 @@ Worker 与本地验证器均成功后，先冻结容器，由可信宿主辅助�
 单文件 8 MiB、总内容 64 MiB。失败、取消或清理失败的 Worker 不发布输出。
 
 确定性验收使用另一个容器，其文件改动不回传。退出码失败或沙箱异常会阻止 promote。
-当前只支持 Git worktree 下的 `/task`；单 Agent 普通交互、非 Git / local 隔离模式尚未接入。
+Git `/task` 与普通单 Agent 交互均已接入；非 Git / local 隔离模式尚未接入。
+普通交互需要项目 Git 根目录和干净工作区（控制面状态与保护 env 路径除外）。每轮创建隔离候选，
+文件工具和命令在同一个容器执行；上下文跨轮保留，容器、临时文件及迭代预算不跨轮复用。
+读任务不创建项目提交；有文件改动时必须配置 `CODEAGENT_VERIFY_CMD`，在独立验收容器通过后
+自动创建候选提交并 CAS fast-forward 到项目，成功结果仅列出实际发布文件。缺验收、验收失败、
+取消、封存或删除失败均不发布；用户并发修改或 HEAD 变化会拒绝合并。`/clear` 只重置对话上下文。
+普通交互不在宿主执行被延后的外部动作；ReAct 完成与发布结果分别记录，最终状态见
+`sandbox_turn_finished`，不能仅把模型声称完成当成成果已发布。
 沙箱模式的 post-promote 外部动作记为跳过（中断动作保留 unknown），即使已审批也不会交给宿主执行。
 容器中没有 Git 元数据；联网安装依赖及发布操作不在本期支持范围内。
 
@@ -248,7 +255,7 @@ python -m pytest -q tests/test_execution_snapshot.py tests/test_sandbox_workspac
 活跃实例保留；删除失败或存在性未知保留记录并拒绝继续。不扫描其他容器。
 独立 Ubuntu VM（`6.8.0-142-generic`）追加全量 **415 passed、1 skipped**，Ruff / Pyright 通过，
 8 个真容器用例和独立内核探针通过，容器清单为空；与此前 WSL2 395 / 1 分开记录。
-待完成：普通交互入口、非 Git 沙箱及按需网络策略。资源账本不替代同 run 的跨进程恢复锁。
+待完成：非 Git 沙箱、含用户未提交改动的交互支持及按需网络策略。资源账本不替代同 run 的跨进程恢复锁。
 
 ### 延后外部动作的恢复边界（A2）
 
@@ -270,3 +277,7 @@ REPL 会逐条询问审批；非交互装配默认拒绝。命令在真实仓库
 
 旧数据库启动时自动新增动作表；升级前没有持久化的动作无法追溯恢复。
 编程装配使用 `NullRunStore` 时没有跨进程恢复能力。恢复保证针对单进程中断，不包含跨进程并发执行。
+
+2026-10-02 普通交互追加验收：独立 Ubuntu VM **428 passed、1 skipped**，10 个真容器用例通过；
+Ruff / Pyright 通过，真实 REPL 的写入、连续读取、/clear、退出冒烟通过，容器清单为空。
+Windows **356 passed、73 skipped**；真实模型历史场景本轮未重跑。

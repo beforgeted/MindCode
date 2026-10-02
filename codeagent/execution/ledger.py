@@ -163,7 +163,9 @@ class SandboxResourceLedger:
             if (re.fullmatch(r"mindcode-[0-9a-f]{32}", record.name) is None
                     or re.fullmatch(r"[0-9a-f]{32}", record.owner) is None
                     or re.fullmatch(r"[0-9a-f]{64}", record.image) is None
-                    or record.purpose not in ("worker", "validation", "interactive_readonly")
+                    or record.purpose not in (
+                        "worker", "validation", "interactive", "interactive_readonly",
+                    )
                     or (record.container_id is not None
                         and re.fullmatch(r"[0-9a-f]{64}", record.container_id) is None)):
                 raise SandboxError("invalid resource record; recovery refused")
