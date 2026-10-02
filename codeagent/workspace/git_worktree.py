@@ -15,10 +15,17 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from codeagent.infra.ids import new_id
 from codeagent.workspace.context import WorkspaceContext
+from codeagent.workspace.verification_evidence import (
+    EvidenceUnit,
+    VerificationEvidence,
+    binary_unit,
+    collect_evidence,
+)
 
 
 class GitWorktreeError(RuntimeError):
@@ -89,6 +96,78 @@ class GitWorktreeWorkspaceManager:
             return _run_git(self._repo, "diff", a, b)
         except GitWorktreeError:
             return ""
+
+    async def verification_evidence(
+        self, a: str, b: str, *, max_bytes: int,
+    ) -> VerificationEvidence:
+        return await asyncio.to_thread(self._verification_evidence, a, b, max_bytes)
+
+    def _verification_evidence(self, a: str, b: str, max_bytes: int) -> VerificationEvidence:
+        files: tuple[str, ...] = ()
+        try:
+            if type(max_bytes) is not int or max_bytes <= 0:
+                raise ValueError("evidence byte limit must be positive")
+            names_result = subprocess.run(
+                ["git", "-C", str(self._repo), "diff", "--no-ext-diff", "--no-renames",
+                 "--name-only", "-z", a, b],
+                capture_output=True, check=True, timeout=60,
+            )
+            names = names_result.stdout.decode("utf-8")
+            files = tuple(sorted(name for name in names.split("\0") if name))
+            diffs: list[tuple[str, str]] = []
+            binary: list[EvidenceUnit] = []
+            remaining = max_bytes
+            for path in files:
+                # Disk-backed capture avoids an unbounded subprocess stdout allocation.
+                # Oversize/error evidence is refused in its entirety, never truncated.
+                with tempfile.TemporaryFile() as output:
+                    proc = subprocess.run(
+                        ["git", "-C", str(self._repo), "--literal-pathspecs", "diff",
+                         "--no-ext-diff", "--no-textconv",
+                         "--no-renames", "--no-color", a, b, "--", path],
+                        stdout=output, stderr=subprocess.PIPE, timeout=60,
+                    )
+                    if proc.returncode:
+                        raise GitWorktreeError("verification diff collection failed")
+                    size = output.tell()
+                    if size > remaining:
+                        raise ValueError("complete evidence exceeds byte limit")
+                    output.seek(0)
+                    raw = output.read()
+                remaining -= size
+                is_binary = b"\0" in raw or any(
+                    line.startswith((b"Binary files ", b"GIT binary patch"))
+                    for line in raw.splitlines()
+                )
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeError:
+                    is_binary = True
+                    text = ""
+                if is_binary:
+                    old, old_mode = self._evidence_blob(a, path, max_bytes)
+                    new, new_mode = self._evidence_blob(b, path, max_bytes)
+                    binary.append(binary_unit(path, old, new, old_mode=old_mode, new_mode=new_mode))
+                    continue
+                diffs.append((path, text))
+            return collect_evidence(a, b, files, diffs, max_bytes=max_bytes, binary=tuple(binary))
+        except (ValueError, OSError, subprocess.SubprocessError, GitWorktreeError) as exc:
+            return VerificationEvidence(a, b, files, detail=f"evidence collection failed: {exc}")
+
+    def _evidence_blob(self, revision: str, path: str, max_bytes: int) -> tuple[bytes | None, str]:
+        entry = _run_git(self._repo, "--literal-pathspecs", "ls-tree", revision, "--", path)
+        if not entry:
+            return None, ""
+        mode, kind, oid = entry.partition("\t")[0].split()
+        if kind != "blob" or mode not in ("100644", "100755"):
+            raise ValueError("unsupported binary entry type")
+        with tempfile.TemporaryFile() as output:
+            subprocess.run(["git", "-C", str(self._repo), "cat-file", "blob", oid],
+                           stdout=output, stderr=subprocess.PIPE, check=True, timeout=60)
+            if output.tell() > max_bytes:
+                raise ValueError("binary content exceeds evidence limit")
+            output.seek(0)
+            return output.read(), mode
 
     async def run_check(
         self, root: Path, command: str, *, timeout_s: float = 300.0

@@ -11,6 +11,7 @@ from codeagent.execution.models import ExecutionLimits
 from codeagent.llm.capabilities import CapabilityConfig
 from codeagent.llm.pricing import CostConfig
 from codeagent.llm.routing import ModelRoutingConfig
+from codeagent.orchestration.verification_limits import VerificationLimits
 from codeagent.workspace.project_identity import resolve_project_identity
 
 
@@ -52,6 +53,7 @@ class AppConfig:
     models: ModelRoutingConfig = field(default_factory=ModelRoutingConfig)
     costs: CostConfig = field(default_factory=CostConfig)
     capabilities: CapabilityConfig = field(default_factory=CapabilityConfig)
+    verification: VerificationLimits = field(default_factory=VerificationLimits)
     execution_backend: str = "local"
     sandbox_image: str | None = None
     sandbox_limits: ExecutionLimits = field(default_factory=ExecutionLimits)
@@ -110,6 +112,13 @@ class AppConfig:
             models=ModelRoutingConfig.from_env(),
             costs=CostConfig.from_env(),
             capabilities=CapabilityConfig.from_env(),
+            verification=VerificationLimits(
+                max_batches=_env_int("CODEAGENT_VERIFICATION_MAX_BATCHES", 32),
+                timeout_seconds=_env_int("CODEAGENT_VERIFICATION_TIMEOUT_SECONDS", 120),
+                max_evidence_bytes=_env_int(
+                    "CODEAGENT_VERIFICATION_MAX_EVIDENCE_BYTES", 8 * 1024 * 1024,
+                ),
+            ),
             execution_backend=os.environ.get("CODEAGENT_EXECUTION_BACKEND") or "local",
             sandbox_image=os.environ.get("CODEAGENT_SANDBOX_IMAGE") or None,
             downloads=DownloadPolicy(

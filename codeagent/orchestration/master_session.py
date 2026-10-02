@@ -118,6 +118,7 @@ async def build_master(
         gverif = global_verifier or (
             NoFailureVerifier() if stub else LlmGlobalVerifier(
                 RoleLlmClient(llm_client, "global_verifier"), model_config,
+                limits=config.verification,
             )
         )
         runtime = AgentRuntime(
@@ -161,6 +162,7 @@ async def build_master(
             memory_writer=memory_writer,
             run_store=run_store,
             cost_store=CostStore(config.state_root / 'runs.db') if config.costs.prices else None,
+            verification_limits=config.verification,
             metrics=metrics,
             approval_policy=(
                 InteractiveApprovalPolicy()

@@ -107,6 +107,7 @@ class AgentRuntime:
         if cancellation is not None:
             run.cancellation = cancellation
 
+        run.context.instruction = step.instruction
         timeout = definition.context_profile.agent_run_timeout_seconds
         try:
             async with asyncio.timeout(timeout):
@@ -116,6 +117,7 @@ class AgentRuntime:
 
                     while (
                         not verification.ok
+                        and not verification.indeterminate
                         and run.reflection_count < definition.max_reflection_count
                     ):
                         run.reflection_count += 1
@@ -123,7 +125,7 @@ class AgentRuntime:
                         feedback = verification.feedback or "上一次未达成目标，请修正后重试。"
                         result = await self._engine.run_turn(run, f"[验证反馈] {feedback}")
                         verification = await self._verifier.verify(run, result)
-                    if result.ok and verification.ok:
+                    if result.ok and verification.ok and not verification.indeterminate:
                         await domain.publish()
         except TimeoutError:
             self._metrics.incr("agent.timeouts")

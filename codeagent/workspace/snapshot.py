@@ -6,8 +6,10 @@ and a RunStore publication receipt; matching filesystem bytes are never a receip
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
 import hashlib
+import json
 import os
 import shutil
 from dataclasses import asdict
@@ -30,6 +32,12 @@ from codeagent.infra.ids import new_id
 from codeagent.orchestration.snapshot_store import SnapshotCheckpoint
 from codeagent.workspace.context import WorkspaceContext
 from codeagent.workspace.manager import _is_git_worktree
+from codeagent.workspace.verification_evidence import (
+    EvidenceUnit,
+    VerificationEvidence,
+    binary_unit,
+    collect_evidence,
+)
 
 
 class SnapshotWorkspaceManager:
@@ -202,6 +210,64 @@ class SnapshotWorkspaceManager:
             if len(text) >= max_bytes:
                 break
         return text[:max_bytes]
+
+    async def verification_evidence(
+        self, a: str, b: str, *, max_bytes: int,
+    ) -> VerificationEvidence:
+        return await asyncio.to_thread(self._verification_evidence, a, b, max_bytes)
+
+    def _verification_evidence(self, a: str, b: str, max_bytes: int) -> VerificationEvidence:
+        before = {e.path: e for e in self._snapshots[a].entries}
+        after = {e.path: e for e in self._snapshots[b].entries}
+        files = tuple(sorted(name for name in before.keys() | after.keys()
+                             if before.get(name) != after.get(name)))
+        diffs: list[tuple[str, str]] = []
+        binary: list[EvidenceUnit] = []
+        try:
+            if type(max_bytes) is not int or max_bytes <= 0:
+                raise ValueError("evidence byte limit must be positive")
+            used = 0
+            for name in files:
+                old_entry, new_entry = before.get(name), after.get(name)
+                old = old_entry.data if old_entry else b""
+                new = new_entry.data if new_entry else b""
+                if len(old) + len(new) > max_bytes:
+                    raise ValueError(f"diff input exceeds evidence limit: {name}")
+                is_binary = b"\0" in old or b"\0" in new
+                try:
+                    old_text, new_text = old.decode("utf-8"), new.decode("utf-8")
+                except UnicodeError:
+                    is_binary = True
+                    old_text = new_text = ""
+                if is_binary:
+                    binary.append(binary_unit(
+                        name, old if old_entry else None, new if new_entry else None,
+                        old_mode=str(bool(old_entry and old_entry.executable)),
+                        new_mode=str(bool(new_entry and new_entry.executable)),
+                    ))
+                    continue
+                text = (
+                    f"snapshot file {json.dumps(name)}\n"
+                    f"old exists={old_entry is not None} "
+                    f"executable={bool(old_entry and old_entry.executable)}\n"
+                    f"new exists={new_entry is not None} "
+                    f"executable={bool(new_entry and new_entry.executable)}\n"
+                )
+                lines = difflib.unified_diff(
+                    old_text.splitlines(True), new_text.splitlines(True),
+                    fromfile=name, tofile=name,
+                )
+                text += "".join(
+                    line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+                    for line in lines
+                )
+                used += len(text.encode("utf-8"))
+                if used > max_bytes:
+                    raise ValueError("complete evidence exceeds byte limit")
+                diffs.append((name, text))
+            return collect_evidence(a, b, files, diffs, max_bytes=max_bytes, binary=tuple(binary))
+        except ValueError as exc:
+            return VerificationEvidence(a, b, files, detail=f"evidence collection failed: {exc}")
 
     async def integrate(
         self, worker: WorkspaceContext, candidate: WorkspaceContext, *,

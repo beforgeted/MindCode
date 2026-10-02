@@ -45,6 +45,8 @@ class RunContext:
     # 最近一次 ContextManager.prepare() 的结果，供 `/context` 读取，
     # 避免为了展示再跑一次准备流程。
     last_prepared: object | None = None
+    # Original Step goal survives reflection and history compaction.
+    instruction: str = ""
 
     def record_tool_runs(self, runs: tuple[ToolRun, ...]) -> None:
         self.tool_runs.extend(runs)

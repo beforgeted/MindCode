@@ -28,9 +28,14 @@ from codeagent.infra.cancellation import CancellationToken, CancelledByUser
 from codeagent.infra.ids import new_id
 from codeagent.infra.metrics import Metrics
 from codeagent.infra.trace import trace_scope, update_trace
+from codeagent.llm.request_budget import RequestBudgetError
 from codeagent.observability import TrajectoryExporter
 from codeagent.orchestration.cost_store import CostStore, cost_scope
-from codeagent.orchestration.global_verifier import GlobalVerifier, VerificationTarget
+from codeagent.orchestration.global_verifier import (
+    GlobalVerdict,
+    GlobalVerifier,
+    VerificationTarget,
+)
 from codeagent.orchestration.planner import Planner
 from codeagent.orchestration.run_lock import RunLeaseManager, RunLockBusy, RunLockError
 from codeagent.orchestration.run_store import (
@@ -45,6 +50,7 @@ from codeagent.orchestration.run_store import (
 from codeagent.orchestration.shared_memory import NullSupervisorMemoryWriter, SupervisorWriter
 from codeagent.orchestration.snapshot_store import SnapshotRunStore
 from codeagent.orchestration.step_scheduler import SchedulerResult, StepScheduler
+from codeagent.orchestration.verification_limits import VerificationLimits
 from codeagent.runtime.agent_runtime import WorkerRun
 from codeagent.tool.approval import ApprovalPolicy, DenyExternalApprovalPolicy
 from codeagent.tool.command_policy import CommandDecision
@@ -106,6 +112,7 @@ class MasterRuntime:
         sandbox_manager: PodmanSandboxManager | None = None,
         run_leases: RunLeaseManager | None = None,
         cost_store: CostStore | None = None,
+        verification_limits: VerificationLimits | None = None,
     ) -> None:
         self._planner = planner
         self._scheduler = scheduler
@@ -130,6 +137,7 @@ class MasterRuntime:
         self._trajectory_timeout = trajectory_timeout_seconds
         self._sandbox = sandbox_manager
         self._cost_store = cost_store
+        self._verification_limits = verification_limits or VerificationLimits()
         self._run_leases = run_leases or RunLeaseManager(
             self._run_store.run_lock_directory
             if isinstance(self._run_store, SqliteRunStore) else None,
@@ -202,6 +210,12 @@ class MasterRuntime:
                 if isinstance(self._wsm, SnapshotWorkspaceManager) and owns_snapshot:
                     await self._run_store.update_run_status(master_run_id, "cancelled")
                 raise
+            except RequestBudgetError as exc:
+                await self._run_store.update_run_status(master_run_id, "failed")
+                final = FinalResult(
+                    task=task, accepted=False, integrated=False, master_run_id=master_run_id,
+                    reason=f"规划请求超出模型预算，完整任务已保留，未降级执行: {exc}",
+                )
             except Exception as exc:
                 if not isinstance(self._wsm, SnapshotWorkspaceManager):
                     raise
@@ -348,7 +362,12 @@ class MasterRuntime:
             )
             if candidate is not None:
                 await self._update_attempt(master_run_id, attempt_no, AttemptState.VERIFYING)
-            verdict = await self._verifier.verify(current_task, graph, result, target)
+            if target is not None and target.evidence is not None and not target.evidence.complete:
+                verdict = GlobalVerdict(
+                    accept=False, indeterminate=True, reason=target.evidence.detail,
+                )
+            else:
+                verdict = await self._verifier.verify(task, graph, result, target)
 
             steps_ok = not result.failed and not result.blocked
             deterministic_ok = target is None or target.deterministic_ok is not False
@@ -415,11 +434,16 @@ class MasterRuntime:
                     verdict=reason[:200] or "reject",
                 )
             await self._discard_attempt(candidate, result)
-            if replans_left <= 0:
+            if (verdict.indeterminate or any(w.verification.indeterminate
+                                            for w in result.workers.values())
+                    or replans_left <= 0):
                 break
             replans_left -= 1
             self._metrics.incr("master.replans")
-            current_task = verdict.replan_instruction or task
+            current_task = (
+                f"{task}\n\n[验收反馈，请保留原始任务全部要求]\n"
+                f"{verdict.replan_instruction}" if verdict.replan_instruction else task
+            )
             graph = await self._planner.plan(current_task)
 
         assert result is not None and verdict is not None
@@ -678,10 +702,17 @@ class MasterRuntime:
     ) -> VerificationTarget | None:
         if git is None or original_base is None or candidate_sha is None:
             return None
-        changed = await git.changed_files(original_base, candidate_sha)
-        diff = await git.diff_text(original_base, candidate_sha)
+        evidence = await git.verification_evidence(
+            original_base, candidate_sha,
+            max_bytes=self._verification_limits.max_evidence_bytes,
+        )
+        changed = set(evidence.changed_files)
+        diff = "\n".join(unit.text for unit in evidence.units)
         det_ok: bool | None = None
         det_detail = ""
+        if evidence.binary_files and not self._verify_command:
+            det_ok = False
+            det_detail = "二进制改动需要配置独立确定性验收命令"
         if isinstance(git, SnapshotWorkspaceManager) and changed and not self._verify_command:
             det_ok = False
             det_detail = "非Git任务包含改动但未配置 CODEAGENT_VERIFY_CMD"
@@ -722,6 +753,7 @@ class MasterRuntime:
             diff=diff,
             deterministic_ok=det_ok,
             deterministic_detail=det_detail,
+            evidence=evidence,
         )
 
     async def _save_attempt(

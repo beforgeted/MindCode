@@ -1,7 +1,7 @@
 """Planner：把用户任务拆成 TaskGraph。
 
 保守失败：LLM 输出无法解析/校验时退化为「单 Step 图」（整个任务交默认 Agent），
-绝不抛异常打断编排。
+上下文预算不足则显式停止，保留完整任务，不能静默退化。
 """
 
 from __future__ import annotations
@@ -11,8 +11,11 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from codeagent.llm.client import LlmClient
+from codeagent.context.token_estimator import HeuristicTokenEstimator, TokenEstimator
+from codeagent.infra.trace import trace_scope
+from codeagent.llm.client import LlmClient, LlmError, LlmErrorKind, effective_model_config
 from codeagent.llm.message import Message
+from codeagent.llm.request_budget import RequestBudgetError, check_request, check_response
 from codeagent.llm.types import ModelConfig
 from codeagent.orchestration.task_graph import Step, TaskGraph, TaskGraphError
 
@@ -71,23 +74,40 @@ class LlmPlanner:
         *,
         default_agent_id: str = "default",
         max_repair_retries: int = 1,
+        estimator: TokenEstimator | None = None,
     ) -> None:
         self._client = client
         self._model_config = model_config
         self._default_agent_id = default_agent_id
         self._max_repair_retries = max(0, max_repair_retries)
+        self._estimator = estimator or HeuristicTokenEstimator()
 
     async def plan(self, task: str) -> TaskGraph:
         messages = [Message.system(_SYSTEM), Message.user(task)]
         attempts = self._max_repair_retries + 1
+        repair = "上一次输出不是合法的 plan JSON，请只输出 JSON。"
         for attempt in range(attempts):
             try:
-                response = await self._client.chat(messages, model_config=self._model_config)
+                config = effective_model_config(self._client, self._model_config)
+                estimated = check_request(
+                    messages, config, self._estimator,
+                    repair_prompt=repair if attempt + 1 < attempts else "",
+                )
+                with trace_scope(planning_attempt=attempt + 1, planning_input_tokens=estimated):
+                    response = await self._client.chat(messages, model_config=config)
+                check_response(response)
                 return self._parse(response.content)
+            except RequestBudgetError:
+                # Cannot prove the Worker can hold this task; no truncation or silent degradation.
+                raise
+            except LlmError as exc:
+                if exc.kind is LlmErrorKind.CONTEXT_LIMIT:
+                    raise RequestBudgetError("planner provider context limit") from exc
+                break
             except (ValidationError, ValueError, TaskGraphError, json.JSONDecodeError):
                 if attempt + 1 >= attempts:
                     break
-                messages.append(Message.user("上一次输出不是合法的 plan JSON，请只输出 JSON。"))
+                messages.append(Message.user(repair))
             except Exception:
                 break
         # 保守失败：退化单 Step，绝不打断编排。

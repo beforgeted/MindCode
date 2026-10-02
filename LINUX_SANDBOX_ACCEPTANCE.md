@@ -441,3 +441,24 @@ Windows保存windows-compact-full/unit/typing-recheck XML和ruff/pyright日志�
 后批异常/版本错误/截断、检查点膨胀、批次耗尽与应急共享、JSON修复预留、并发完成乱序、取消排空及Session轨迹装配。
 全部模型行为由固定Provider控制，没有新增付费LLM质量、语义保留或费用节省评测。
 单原子turn/delta过大或事实持续增长可导致明确失败，启发式不保证供应商精确窗口；Planner/Verifier长输入仍待做。
+
+
+## 2026-10-03 追加：Planner/Verifier长输入与完整证据
+
+上一阶段c56ebfa，本期新修改已验收并随本次提交归档。独立 Ubuntu VM **776 passed、1 skipped**，34 个真容器用例通过；Windows **620 passed、157 skipped**，两端 Ruff/Pyright 通过。
+VM为mengx@192.168.100.128，最终独立目录/home/mengx/mindcode-verification-hardened.D55eNq。
+214份源文件/配置/测试/场景摘要核对；新venv复用依赖且python -I确认新源码。
+原/home/mengx/MindCode的env、Git HEAD/status与历史012摘要不变，最终Podman ps为空。
+新增56项预算/证据测试和4项真实容器场景，73项专项包含受控下载失败用例复验，均计入全量。
+34个真容器为原18项隔离/流程、9项下载、3项强杀恢复，加本期4项验收端到端，不把14个模拟Podman单元计入。
+
+首轮/home/mengx/mindcode-verification.63xcZ3全量为766通过、1失败、1跳过，静态通过。
+失败为test_task_download_only_publishes_after_independent_acceptance[accept]：
+新证据逻辑一律拒绝二进制，挡住已有独立容器SHA256检查；不是网络、容器隔离或模型错误。
+修正为冻结二进制完整元数据加独立确定性门禁，补充无检查拒绝和Git创建/修改/删除摘要绑定验证。
+首轮源码、日志、pytest现场备份failed-download-scene保留；二进制修正目录/home/mengx/mindcode-verification-final.F0N0bo完整774/1通过，静态通过；最后补字面路径与规划超时边界，在最终目录776/1通过。最终pytest-unit/full临时路径位于新目录，避免自动清除旧现场。
+
+本地.codeagent/validation/vm-verification/保存最终XML/日志/退出码/源码清单/运行时信息/保护基线和verification-summary.json；
+.codeagent/validation/vm-verification-failed/保存首轮失败XML与日志；Windows保存windows-verification-full.xml/log及Ruff/Pyright日志。
+没有WSL测试；模型行为均固定模拟，真容器和HTTPS为实际执行，没有新付费模型语义/成本节省实验。
+设计及估算/证据/资源边界见VERIFICATION_INPUT_BUDGET.md。

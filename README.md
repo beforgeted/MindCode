@@ -10,7 +10,7 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback；R1二期显式定价、持久化成本与Worker阈值降级也已实现。
 **B4/B5 沙箱**已接入 Git / 非 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
 离线执行与受校验快照回传。B5 一期新增受控 HTTPS 文件下载，容器仍断网。C6 同 run 跨进程恢复互斥、
-非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **716 passed、1 skipped**，30 个真容器用例通过；Windows **564 passed、153 skipped**，两端 Ruff/Pyright 通过。
+非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **776 passed、1 skipped**，34 个真容器用例通过；Windows **620 passed、157 skipped**，两端 Ruff/Pyright 通过。
 真实 deepseek-flash 历史11场景和非Git任务正/负例通过是此前阶段的模型回归；本期恢复测试用Stub固定
 模型步骤，容器与进程强杀是真实操作，下载回归使用真实HTTPS。
 详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
@@ -433,3 +433,18 @@ LLM trace新增compaction_id与chunk/批号/版本，既有trajectory可查看�
 生产字节与全量快照一致；唯一测试类型标注修正后两端重查31项及静态，修正前证据保留。
 设计见[COMPACTION_WINDOW_ADAPTATION.md](COMPACTION_WINDOW_ADAPTATION.md)。上一阶段已提交9451e8e，本期压缩适配已验收并随本次提交归档。
 后续Planner/Verifier长输入规划、精确计数校准、完整参数协商及真实质量/费用评测待做。
+
+
+### R1三期第三部分：Planner/Verifier长输入与完整证据（2026-10-03）
+
+独立 Ubuntu VM **776 passed、1 skipped**，34 个真容器用例通过；Windows **620 passed、157 skipped**，两端 Ruff/Pyright 通过。新增56项预算/证据测试和4项真容器场景，73项专项计入全量。
+Planner按有效角色模型预算完整请求，任务超限明确停止；原始任务在重规划与最终验收中保留。
+局部验收保留原始Step目标，严格JSON布尔；无法判定停止反思、禁止容器变更回传。
+全局从冻结Git/快照采集完整hunk和元数据，按窗口分批并核对全部编号，最后检查任务与跨文件一致性。
+二进制绑定完整内容SHA256等元数据，必须配置独立确定性检查并通过，保留已有受控下载验收。
+任何证据缺失、超限、输出截断或无法判定都不推进真实base，不把分批通过直接当作任务完成。
+默认CODEAGENT_VERIFICATION_MAX_BATCHES=32、CODEAGENT_VERIFICATION_TIMEOUT_SECONDS=120、CODEAGENT_VERIFICATION_MAX_EVIDENCE_BYTES=8388608。
+全局语义阶段超时不等于整个采集/任务总截止时间；批次也不是账单硬上限。
+首轮VM全量发现二进制一律拒绝挡住下载SHA256验收，日志和现场保留；修正后全量774/1通过，再补路径字面量与规划取消边界，最终新目录完整复验。
+设计见[VERIFICATION_INPUT_BUDGET.md](VERIFICATION_INPUT_BUDGET.md)。上一阶段c56ebfa，本期已验收并随本次提交归档。
+模型判定使用固定Provider，没有新增付费模型质量/费用评测；后续精确计数校准、完整能力、任务特征、硬预算与真实模型评测待做。

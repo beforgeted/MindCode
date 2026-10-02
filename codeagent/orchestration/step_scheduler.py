@@ -177,7 +177,8 @@ class StepScheduler:
                     step_id = running.pop(task)
                     worker = task.result()  # _run_step 恒不抛
                     workers[step_id] = worker
-                    if worker.verification.ok and worker.result.ok:
+                    if (worker.verification.ok and worker.result.ok
+                            and not worker.verification.indeterminate):
                         completed.add(step_id)
                         pending.append(step_id)  # 进集成队列,由②串行处理
                     else:

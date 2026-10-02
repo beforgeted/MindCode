@@ -13,7 +13,7 @@ from codeagent.orchestration.task_graph import TaskGraph
 from codeagent.runtime.local_verifier import LlmLocalVerifier
 from codeagent.workspace.context import WorkspaceContext
 
-_MC = ModelConfig(model="stub", context_window=1000)
+_MC = ModelConfig(model="stub", context_window=1000, max_output_tokens=128)
 _DEFN = AgentDefinition(id="default", name="D", system_prompt="")
 
 
@@ -40,6 +40,7 @@ async def test_llm_local_verifier_parses_verdict():
     client = StubLlmClient(['{"ok":false,"reason":"缺测试","feedback":"补测试"}'])
     run = AgentRun.create(_DEFN, session_id="s", workspace=WorkspaceContext.local(Path(".")))
     result = AgentRunResult.success(run.run_id, "改完了")
+    run.context.instruction = "修改目标文件并补测试"
     verdict = await LlmLocalVerifier(client, _MC).verify(run, result)
     assert verdict.ok is False
     assert verdict.feedback == "补测试"
@@ -55,8 +56,9 @@ async def test_llm_local_verifier_conservative_on_llm_failure():
 
     run = AgentRun.create(_DEFN, session_id="s", workspace=WorkspaceContext.local(Path(".")))
     result = AgentRunResult.success(run.run_id, "x")
+    run.context.instruction = "完成任务"
     verdict = await LlmLocalVerifier(BoomClient(), _MC).verify(run, result)
-    assert verdict.ok is True  # 保守失败：验证器故障不卡编排
+    assert not verdict.ok and verdict.indeterminate
 
 
 async def test_llm_global_verifier_parses_verdict():
