@@ -1,6 +1,6 @@
 # Linux Podman 分环境验收记录
 
-2026-10-01 当前最终版本：独立 Ubuntu VM **415 passed、1 skipped**，8 个真容器用例与独立探针通过；Ruff / Pyright 通过，容器清单为空。
+2026-10-02 当前最终版本：独立 Ubuntu VM **454 passed、1 skipped**，14 个真容器用例与两类共享目录 REPL 冒烟通过；Ruff / Pyright 通过，容器清单为空。
 
 以下先保留此前 WSL2 一期结果，独立 VM 追加实现与证据见文末。
 
@@ -57,7 +57,7 @@
 
 ## 复现
 
-已准备环境可直接在 Ubuntu 以 meng 用户执行：
+以下命令仅为 WSL 历史复现记录，禁止再次执行；当前 VM 复现目录见文末：
 
 ```bash
 cd /home/meng/mindcode-linux-validation.VXxwX4
@@ -152,3 +152,35 @@ Windows356 / 73，静态检查通过。交互与工具门禁专项23项通过，
 证据 `.codeagent/validation/vm-interactive/`：vm-full.xml/log、vm-unit.xml/log、vm-ruff.log、vm-pyright.log、
 vm-exit-codes.json、source-manifest.json、vm-cli-smoke.json/log、vm-containers-before/after.json及运行环境文件。
 本轮新改动尚未提交，后续文档更新不属于被测源码清单。
+
+
+## 2026-10-02 追加：dirty Git / 非 Git 普通交互与写回恢复
+
+先提交普通交互阶段 `4128098`，再实现本节。独立 VM 为 mengx@192.168.100.128，内核
+6.8.0-142-generic；最终目录 `/home/mengx/mindcode-shared-accepted.gman3d`，182 个源码文件哈希逐一核对，
+原 `/home/mengx/MindCode` 与历史现场保留。没有 WSL 测试、没有重新安装依赖或拉取镜像。
+
+最终全量 **454 passed、1 skipped**（253.578 秒）；14 个真容器用例全部通过，Ruff/Pyright通过。
+Windows **356 passed、99 skipped**；新增 Linux 专属用例在 Windows 跳过。针对性45项包含在全量内。
+真实 REPL 分别测试 dirty Git 与非 Git：写42、下一轮读、clear、退出，保留用户文件、Git暂存与HEAD；
+非Git不创建.git。全量前后与 REPL 结束的容器清单均为空。Stub固定输出，不代表历史真实LLM场景已复验。
+
+新增实测：暂存/工作区不同版本与未跟踪文件的输入、验收接受与拒绝、并发工作文件/暂存修改拒绝；
+真实SIGKILL覆盖prepared、临时文件、部分替换、applied四窗口。IO故障回滚原数据与新目录；新用户修改
+或损坏日志保留并报告待核对。applied标记替换后持久化确认异常也报告待核对，不能宣称未发布。
+当前共享发布不改变Git暂存区和HEAD；干净Git原有自动候选提交/CAS路径保留。日志仅负责文件发布，
+不是新增任务编排恢复权威；容器账本负责资源回收，RunStore负责Attempt恢复，C6互斥仍未实现。
+
+边界：flock仅约束MindCode写者，快照与逐文件复查不能提供针对外部编辑器的全局原子CAS。
+外部修改与回滚冲突时保留记录供人工核对，不强行覆盖。文件/目录互换拒绝；非Git `/task`、按需网络、
+同run跨进程resume锁与真实模型历史套件仍待做。默认local不因此获得容器隔离。
+
+失败现场：`mindcode-shared-validation.vYNFcS/first-failed-unit` 保留非Git用例误放Git子目录与静态问题；
+该目录首轮全量4失败因真实read_file带行号而模拟输出无行号，发布条件未放宽，修正断言后重跑。
+`mindcode-shared-final.bQfUUP` 保存补持久化边界前版本；最终以accepted目录为准，不累加各轮数字。
+
+证据 `.codeagent/validation/vm-shared/`：vm-full.xml/log、vm-unit.xml/log、vm-ruff.log、vm-pyright.log、
+vm-exit-codes.json、source-manifest.json、vm-cli-smoke.json、vm-cli-dirty-git/plain.log、容器前后清单、
+内核/Podman/受信镜像信息与acceptance-summary.json。代码和测试哈希与最终源码一致，后续文档不属于清单。
+复现：SSH进入最终VM目录，设置 MINDCODE_PODMAN_TEST_IMAGE 为上述完整镜像ID，用 .venv/bin/python
+执行 pytest -q、ruff check . 和 pyright --pythonpath "$PWD/.venv/bin/python"。本轮新改动尚未提交。

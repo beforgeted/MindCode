@@ -224,6 +224,8 @@ def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
 
 def _read_tree_fd(
     root_fd: int, limits: SnapshotLimits, *, workspace_input: bool = False,
+    include_paths: frozenset[str] | None = None,
+    exclude_paths: frozenset[str] = frozenset(),
 ) -> TreeSnapshot:
     """Read an already securely opened root; used by the trusted proc helper."""
     _require_posix()
@@ -232,6 +234,10 @@ def _read_tree_fd(
     count = 0
     total = 0
     seen: set[str] = set()
+    included = None if include_paths is None else {
+        "/".join(parts[:i]) for name in include_paths for parts in [_parts(name)]
+        for i in range(1, len(parts) + 1)
+    }
 
     def visit(fd: int, prefix: str) -> None:
         nonlocal count, total
@@ -240,6 +246,11 @@ def _read_tree_fd(
             raise SnapshotError("snapshot root is not a directory")
         with os.scandir(fd) as children:
             for child in children:
+                name = f"{prefix}/{child.name}" if prefix else child.name
+                if any(name == p or name.startswith(p + "/") for p in exclude_paths):
+                    continue
+                if included is not None and name not in included:
+                    continue
                 if workspace_input:
                     folded_name = child.name.casefold()
                     if (folded_name in (".git", ".codeagent", ".env")
@@ -248,7 +259,6 @@ def _read_tree_fd(
                 count += 1
                 if count > limits.max_files:
                     raise SnapshotError("file and directory count exceeds limit")
-                name = f"{prefix}/{child.name}" if prefix else child.name
                 _parts(name)
                 folded = name.casefold()
                 if folded in seen:
@@ -303,6 +313,8 @@ def _read_tree_fd(
 
 def read_tree(
     root: Path, limits: SnapshotLimits = SnapshotLimits(), *, workspace_input: bool = False,
+    include_paths: frozenset[str] | None = None,
+    exclude_paths: frozenset[str] = frozenset(),
 ) -> TreeSnapshot:
     """Read strictly; trusted initial input may omit repository state/secrets.
 
@@ -312,7 +324,10 @@ def read_tree(
     try:
         fd = _open_directory(root)
         try:
-            return _read_tree_fd(fd, limits, workspace_input=workspace_input)
+            return _read_tree_fd(
+                fd, limits, workspace_input=workspace_input,
+                include_paths=include_paths, exclude_paths=exclude_paths,
+            )
         finally:
             os.close(fd)
     except OSError as exc:

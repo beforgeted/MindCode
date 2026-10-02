@@ -9,7 +9,7 @@ import pytest
 
 from codeagent.agent.models import RunStatus
 from codeagent.context.history.conversation_history import validate_tool_protocol
-from codeagent.execution.models import ExecutionPurpose, SandboxError
+from codeagent.execution.models import ExecutionPurpose
 from codeagent.llm.message import Message, ToolUseBlock
 from codeagent.llm.stub_client import StubLlmClient
 from codeagent.session import AgentSession
@@ -102,14 +102,18 @@ async def test_failed_turn_never_publishes(interactive, failure, monkeypatch):
         validate_tool_protocol(session.run.history.messages)
 
 
-async def test_dirty_base_refused_before_tools(interactive):
+async def test_dirty_base_reads_actual_user_files_without_committing(interactive):
     repo, config, manager = interactive
     (repo / "seed.txt").write_text("user edit")
-    async with AgentSession(config, llm_client=StubLlmClient(["done"])) as session:
-        with pytest.raises(SandboxError, match="未提交"):
-            await session.send("edit")
-    assert not manager.calls
+    head = _git_out(repo, "rev-parse", "HEAD")
+    client = StubLlmClient([[('read_file', {"path": "seed.txt"})], "done"])
+    async with AgentSession(config, llm_client=client) as session:
+        assert (await session.send("read")).ok
+        tool_result = session.run.context.tool_runs[-1].result
+        assert tool_result is not None and tool_result.content == "user edit"
+    assert manager.calls
     assert (repo / "seed.txt").read_text() == "user edit"
+    assert _git_out(repo, "rev-parse", "HEAD") == head
 
 
 @pytest.mark.parametrize("change", ["dirty", "head"])
@@ -168,3 +172,80 @@ async def test_task_cancellation_repairs_protocol_and_next_turn_recovers(interac
         monkeypatch.setattr(session.engine, "run_turn", original)
         assert (await session.send("continue")).ok
         assert not (repo / "note.txt").exists()
+
+
+@pytest.mark.parametrize("accept", [True, False])
+async def test_dirty_staged_and_untracked_input_is_preserved(interactive, accept):
+    repo, config, manager = interactive
+    (repo / "seed.txt").write_text("staged")
+    _git_out(repo, "add", "seed.txt")
+    (repo / "seed.txt").write_text("working")
+    (repo / "user.txt").write_text("untracked")
+    (repo / ".gitignore").write_text(".venv/\n")
+    (repo / ".venv").mkdir()
+    (repo / ".venv" / "python").symlink_to("/usr/bin/python3")
+    head = _git_out(repo, "rev-parse", "HEAD")
+    staged = _git_out(repo, "diff", "--cached", "--binary")
+    manager.validation_exit = 0 if accept else 1
+    client = StubLlmClient([
+        [("read_file", {"path": "seed.txt"})],
+        [("write_file", {"path": "seed.txt", "content": "working+agent"})], "done",
+    ])
+    async with AgentSession(config, llm_client=client) as session:
+        result = await session.send("append to working contents")
+        assert result.ok is accept
+        tool_result = session.run.context.tool_runs[0].result
+        assert tool_result is not None and tool_result.content == "working"
+        assert not manager.domains and _worktree_count(repo) == 1
+    assert (repo / "seed.txt").read_text() == ("working+agent" if accept else "working")
+    assert (repo / "user.txt").read_text() == "untracked"
+    assert _git_out(repo, "rev-parse", "HEAD") == head
+    assert _git_out(repo, "diff", "--cached", "--binary") == staged
+
+
+@pytest.mark.parametrize("git,change", [(True, "working"), (True, "index"), (False, "working")])
+async def test_shared_concurrent_changes_refuse_write(
+    interactive, git, change, monkeypatch, tmp_path,
+):
+    repo, config, manager = interactive
+    (repo / "seed.txt").write_text("initial dirty")
+    if not git:
+        config = replace(config, workspace_root=tmp_path / "plain")
+        config.workspace_root.mkdir()
+        (config.workspace_root / "seed.txt").write_text("initial dirty")
+        repo = config.workspace_root
+    execute = manager.execute
+
+    async def edit(handle, command, **kwargs):
+        if handle.purpose == ExecutionPurpose.VALIDATION:
+            if change == "index":
+                _git_out(repo, "add", "seed.txt")
+            else:
+                (repo / "seed.txt").write_text("editor new")
+        return await execute(handle, command, **kwargs)
+
+    monkeypatch.setattr(manager, "execute", edit)
+    client = StubLlmClient([[('write_file', {"path": "note.txt", "content": "A"})], "done"])
+    async with AgentSession(config, llm_client=client) as session:
+        assert not (await session.send("create note")).ok
+        assert not manager.domains
+    assert not (repo / "note.txt").exists()
+    if change == "working":
+        assert (repo / "seed.txt").read_text() == "editor new"
+
+
+@pytest.mark.parametrize("accept", [True, False])
+async def test_non_git_publication_is_verified(interactive, tmp_path, accept):
+    _, config, manager = interactive
+    root = tmp_path / "plain"
+    root.mkdir()
+    (root / "seed.txt").write_text("user data")
+    config = replace(config, workspace_root=root)
+    manager.validation_exit = 0 if accept else 1
+    client = StubLlmClient([[('write_file', {"path": "note.txt", "content": "A"})], "done"])
+    async with AgentSession(config, llm_client=client) as session:
+        assert (await session.send("create note")).ok is accept
+        assert not manager.domains
+    assert (root / "note.txt").exists() is accept
+    assert (root / "seed.txt").read_text() == "user data"
+    assert not (root / ".git").exists()

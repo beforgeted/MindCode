@@ -299,3 +299,49 @@ async def test_real_interactive_multiturn_publication_and_rejection(image, tmp_p
         assert (await session.send("hello")).ok
         assert _worktree_count(tmp_path) == 1
         assert not session._interactive.manager._handles
+
+
+@pytest.mark.parametrize("git", [True, False], ids=["dirty_git", "plain_directory"])
+@pytest.mark.parametrize("accept", [True, False], ids=["accept", "reject"])
+async def test_real_shared_interactive_preserves_user_state(image, tmp_path, git, accept):
+    from dataclasses import replace
+
+    from codeagent.llm.stub_client import StubLlmClient
+    from codeagent.session import AgentSession
+    from tests.test_master_integration import _config, _git_out, _init_repo
+
+    head = index = ""
+    if git:
+        _init_repo(tmp_path)
+        (tmp_path / "seed.txt").write_text("staged")
+        _git_out(tmp_path, "add", "seed.txt")
+        head = _git_out(tmp_path, "rev-parse", "HEAD")
+        index = _git_out(tmp_path, "diff", "--cached")
+    (tmp_path / "seed.txt").write_text("working")
+    (tmp_path / "user.txt").write_text("untracked user data")
+    config = replace(_config(tmp_path), home=tmp_path / ".codeagent",
+                     project_root=tmp_path / ".codeagent", execution_backend="podman",
+                     sandbox_image=image, verify_command=(
+                         "test $(cat seed.txt) = accepted && test $(cat note.txt) = sandbox"
+                         if accept else "false"))
+    client = StubLlmClient([
+        [("read_file", {"path": "seed.txt"})],
+        [("write_file", {"path": "seed.txt", "content": "accepted"}),
+         ("write_file", {"path": "note.txt", "content": "sandbox"})], "done",
+        [("read_file", {"path": "seed.txt"})], "read actual state",
+    ])
+    async with AgentSession(config, llm_client=client) as session:
+        result = await session.send("modify actual working files")
+        assert result.ok is accept
+        read = session.run.context.tool_runs[0].result
+        assert read is not None and read.content.splitlines()[-1].strip() == "1\tworking"
+        assert (tmp_path / "seed.txt").read_text() == ("accepted" if accept else "working")
+        assert (tmp_path / "note.txt").exists() is accept
+        assert (tmp_path / "user.txt").read_text() == "untracked user data"
+        if git:
+            assert _git_out(tmp_path, "rev-parse", "HEAD") == head
+            assert _git_out(tmp_path, "diff", "--cached") == index
+        else:
+            assert not (tmp_path / ".git").exists()
+        assert (await session.send("read after acceptance or rejection")).ok
+        assert session._interactive is not None and not session._interactive.manager._handles

@@ -9,7 +9,7 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 优化 **O1** 已实现：角色/模型调用归因、Attempt 状态历史与任务轨迹 JSON 导出。
 优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback（金额预算路由待做）。
 **B4/B5 沙箱**已接入 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
-离线执行与受校验快照回传。独立 Ubuntu VM 最新验收 **428 passed、1 skipped**，10 个真容器用例通过；
+离线执行与受校验快照回传。独立 Ubuntu VM 最新验收 **454 passed、1 skipped**，14 个真容器用例通过；
 详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
 
 ## 快速开始
@@ -192,7 +192,7 @@ Judge/治理链失败宁可不写长期 Memory，Planner/Verifier 失败退化/�
 待处理动作）、放行阶段经 `ApprovalPolicy`（默认 fail-safe 拒绝）。
 
 默认 `local` 后端仍在本机执行。`SandboxExecutor` 已实现，显式选择 `podman` 后使用下述隔离流程；
-2026-10-01 已在 WSL2 Linux 完成真实容器验收；Windows 模拟测试与 Linux 实测的证据分别保留。
+当前在独立 Ubuntu VM 完成真实容器验收；Windows 与 VM 证据分别记录，WSL 仅保留历史结果。
 
 ### Podman 沙箱（B4/B5 第一期）
 
@@ -225,8 +225,8 @@ Worker 与本地验证器均成功后，先冻结容器，由可信宿主辅助�
 单文件 8 MiB、总内容 64 MiB。失败、取消或清理失败的 Worker 不发布输出。
 
 确定性验收使用另一个容器，其文件改动不回传。退出码失败或沙箱异常会阻止 promote。
-Git `/task` 与普通单 Agent 交互均已接入；非 Git / local 隔离模式尚未接入。
-普通交互需要项目 Git 根目录和干净工作区（控制面状态与保护 env 路径除外）。每轮创建隔离候选，
+Git `/task` 与普通单 Agent 交互均已接入；普通交互支持非 Git 目录，非 Git `/task` 仍待接入。
+干净 Git 根工作区的普通交互每轮创建隔离候选，
 文件工具和命令在同一个容器执行；上下文跨轮保留，容器、临时文件及迭代预算不跨轮复用。
 读任务不创建项目提交；有文件改动时必须配置 `CODEAGENT_VERIFY_CMD`，在独立验收容器通过后
 自动创建候选提交并 CAS fast-forward 到项目，成功结果仅列出实际发布文件。缺验收、验收失败、
@@ -255,7 +255,7 @@ python -m pytest -q tests/test_execution_snapshot.py tests/test_sandbox_workspac
 活跃实例保留；删除失败或存在性未知保留记录并拒绝继续。不扫描其他容器。
 独立 Ubuntu VM（`6.8.0-142-generic`）追加全量 **415 passed、1 skipped**，Ruff / Pyright 通过，
 8 个真容器用例和独立内核探针通过，容器清单为空；与此前 WSL2 395 / 1 分开记录。
-待完成：非 Git 沙箱、含用户未提交改动的交互支持及按需网络策略。资源账本不替代同 run 的跨进程恢复锁。
+待完成：非 Git `/task` 沙箱、按需网络策略及历史真实模型场景复验。资源账本不替代同 run 的跨进程恢复锁。
 
 ### 延后外部动作的恢复边界（A2）
 
@@ -281,3 +281,19 @@ REPL 会逐条询问审批；非交互装配默认拒绝。命令在真实仓库
 2026-10-02 普通交互追加验收：独立 Ubuntu VM **428 passed、1 skipped**，10 个真容器用例通过；
 Ruff / Pyright 通过，真实 REPL 的写入、连续读取、/clear、退出冒烟通过，容器清单为空。
 Windows **356 passed、73 skipped**；真实模型历史场景本轮未重跑。
+
+
+2026-10-02 共享工作区追加验收：独立 Ubuntu VM **454 passed、1 skipped**，14 个真容器用例通过；
+Windows **356 passed、99 skipped**，Ruff / Pyright 通过。含未提交修改的 Git 与非 Git 普通交互均通过
+真实 REPL 写入、连续读取、/clear、退出冒烟，最终无容器残留；全程未在 WSL 跑测试。
+
+含暂存、未暂存或未跟踪文件的 Git 工作区采用当前工作文件快照，验收后只回写差异，保留暂存区与 HEAD，
+不自动提交。不读取忽略的非跟踪文件；已有被跟踪文件即使匹配 ignore 规则仍纳入输入。非 Git 普通交互
+使用同一发布机制，不创建仓库。控制面状态、env、常见非 Git 虚拟环境与缓存不进入模型执行域。
+输出忽略产物在独立验收前过滤，验收不能依赖随后会丢弃的文件。
+
+共享写回先持久化 prepared 日志，再逐文件原子替换并 fsync，最后写入 applied 决定；恢复会回滚未完成
+的差异，已 applied 的成果保留。发现用户的新修改、损坏记录或发布决定确认失败时报告“待核对”并保留记录。
+日志在 state_root/publication/<工作区路径摘要>，目录0700、文件0600，保存有界前后文件内容，模型不可访问。
+MindCode 写入使用 flock 串行化，并在输入与写回前后复查工作树、HEAD、分支和暂存内容。该锁无法约束
+不遵守租约的外部编辑器，多个文件的可见性也不是全局原子事务；文件与目录互相转换暂时拒绝。
