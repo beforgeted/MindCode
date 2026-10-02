@@ -12,7 +12,8 @@ run 已 success 或末尾 attempt 已 PROMOTED → 不重推 Git，继续处理�
 新 Attempt 重跑整张图。BASE_STALE 与语义 replan 走**独立预算**。step_outcome 仍作审计/可观测。
 
 外部动作清单在 promote 前落库，按 run / Attempt / 动作 ID 隔离。success 仅表示 Git 成果已接受，
-不代表外部动作全部成功；动作状态与累计尝试次数单独记录。仅支持单进程恢复（无跨进程锁）。
+不代表外部动作全部成功；动作状态与累计尝试次数单独记录。MasterRuntime 持有同 run 的内核租约，
+恢复判断/编排/外部动作/导出在同一租约内；SQLite 写事务不跨模型或工具调用。
 
 设计：SQLite + WAL + `asyncio.to_thread`，风格对齐 memory/sqlite_store.py；默认 NullRunStore
 （no-op）：单测 / 不需要持久化时零成本。
@@ -301,6 +302,17 @@ class RunStoreError(RuntimeError):
 
 
 _SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS snapshot_run (
+    master_run_id TEXT PRIMARY KEY,
+    binding TEXT NOT NULL,
+    original_revision TEXT NOT NULL,
+    initial BLOB NOT NULL,
+    candidate BLOB,
+    candidate_revision TEXT,
+    candidate_attempt INTEGER,
+    publication_state TEXT NOT NULL,
+    receipt_id TEXT
+);
 CREATE TABLE IF NOT EXISTS attempt_transition (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     master_run_id TEXT NOT NULL,
@@ -376,9 +388,14 @@ class SqliteRunStore:
     """`state_root/runs.db`，WAL，阻塞 I/O 一律 to_thread。"""
 
     def __init__(self, path: Path | str) -> None:
-        self._path = Path(path)
+        self._path = Path(path).resolve()
         self._lock = asyncio.Lock()
         self._started = False
+
+    @property
+    def run_lock_directory(self) -> Path:
+        """Same canonical database path implies the same controller lock namespace."""
+        return self._path.parent / ('.' + self._path.name + '.run-locks')
 
     async def load_observations(self, master_run_id: str) -> dict[str, list[dict[str, Any]]]:
         def op(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
@@ -468,15 +485,32 @@ class SqliteRunStore:
         conn = sqlite3.connect(self._path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA synchronous = FULL")
         return conn
 
     async def _run(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
         async with self._lock:
             if not self._started:
                 raise RunStoreError("RunStore 尚未启动")
+            operation_task = asyncio.create_task(
+                asyncio.to_thread(self._with_connection, operation),
+            )
             try:
-                return await asyncio.to_thread(self._with_connection, operation)
+                return await asyncio.shield(operation_task)
+            except asyncio.CancelledError:
+                # Cancelling to_thread does not stop its writer. Drain it before
+                # releasing both the asyncio mutex and MasterRuntime's run lease.
+                # Repeated cancellation must not abandon that writer either.
+                while not operation_task.done():
+                    try:
+                        await asyncio.shield(operation_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if operation_task.done() and not operation_task.cancelled():
+                    operation_task.exception()  # consume failure; cancellation remains primary
+                raise
             except sqlite3.Error as exc:
                 raise RunStoreError(f"SQLite RunStore 不可用: {exc}") from exc
 

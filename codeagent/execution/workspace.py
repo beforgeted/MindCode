@@ -50,7 +50,9 @@ def publish_workspace(
             if before.get(name) != after.get(name):
                 raise SnapshotError("sandbox cannot modify Git control files")
     # Validate/materialize the entire output before touching the Worker tree.
-    with tempfile.TemporaryDirectory(prefix="mindcode-snapshot-") as staging:
+    with tempfile.TemporaryDirectory(
+        prefix="mindcode-snapshot-", dir=workspace.handoff_staging_root,
+    ) as staging:
         apply_snapshot(output, Path(staging), limits)
         root_fd = _open_directory(workspace.root)
         try:

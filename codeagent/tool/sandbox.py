@@ -11,6 +11,7 @@ from typing import Any
 
 from codeagent.execution.models import SandboxError
 from codeagent.tool.base import Tool, ToolExecutionContext
+from codeagent.tool.builtin.download_file import DownloadFileTool
 from codeagent.tool.builtin.evidence_get import EvidenceGetTool
 from codeagent.tool.builtin.grep import GrepTool
 from codeagent.tool.builtin.memory_get import MemoryGetTool
@@ -29,7 +30,9 @@ class SandboxTools:
     async def execute(
         self, tool: Tool, ctx: ToolExecutionContext, arguments: dict[str, Any],
     ) -> ToolResult:
-        if type(tool) in (RunCommandTool, ReadArtifactTool, MemoryGetTool, EvidenceGetTool):
+        if type(tool) in (
+            RunCommandTool, ReadArtifactTool, MemoryGetTool, EvidenceGetTool, DownloadFileTool,
+        ):
             return await tool.execute(ctx, arguments)
         if type(tool) not in (ReadFileTool, WriteFileTool, GrepTool):
             raise SandboxError(f"工具尚未接入沙箱: {tool.name}")

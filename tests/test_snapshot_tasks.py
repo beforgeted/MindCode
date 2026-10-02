@@ -26,6 +26,10 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="POSIX task snap
 
 @pytest.fixture
 def task(tmp_path, monkeypatch):
+    return make_task_fixture(tmp_path, monkeypatch)
+
+
+def make_task_fixture(tmp_path, monkeypatch):
     root = tmp_path / "plain"
     root.mkdir()
     (root / "seed.txt").write_text("user")
@@ -207,17 +211,17 @@ async def test_parallel_worker_snapshot_staleness(task, reason):
         wsm.end()
 
 
-async def test_resume_refusal_preserves_success_record(task):
+async def test_resume_receipt_preserves_success_record(task):
     _, config, _ = task
     async with MasterSession(config, llm_client=client(), planner=planner()) as session:
         result = await session.run_task("edit")
         assert result.integrated and session.master is not None
         before = await session.master._run_store.load_run(result.master_run_id)
-        refused = await session.master.run(
+        recovered = await session.master.run(
             "resume", session_id=session.session.session_id,
             resume_master_run_id=result.master_run_id,
         )
-        assert not refused.integrated and "暂不支持resume" in refused.reason
+        assert recovered.integrated and recovered.scheduler is None
         after = await session.master._run_store.load_run(result.master_run_id)
         assert before is not None and after is not None
         assert after.status == before.status == "success"

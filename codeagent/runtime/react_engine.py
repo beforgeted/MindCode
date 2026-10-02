@@ -184,7 +184,8 @@ def _to_block(result: ToolResult) -> ToolResultBlock:
 def _files_from(tool_runs: Sequence[ToolRun]) -> tuple[FileState, ...]:
     out: list[FileState] = []
     for tr in tool_runs:
-        if tr.call.name != "write_file" or tr.result is None or tr.result.is_error:
+        if (tr.call.name not in ("write_file", "download_file")
+                or tr.result is None or tr.result.is_error):
             continue
         path = str(tr.result.metadata.get("path") or tr.call.arguments.get("path") or "")
         if not path:

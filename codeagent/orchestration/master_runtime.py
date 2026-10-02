@@ -31,15 +31,18 @@ from codeagent.infra.trace import trace_scope, update_trace
 from codeagent.observability import TrajectoryExporter
 from codeagent.orchestration.global_verifier import GlobalVerifier, VerificationTarget
 from codeagent.orchestration.planner import Planner
+from codeagent.orchestration.run_lock import RunLeaseManager, RunLockBusy, RunLockError
 from codeagent.orchestration.run_store import (
     AttemptRecord,
     AttemptState,
     NullRunStore,
     RunRecord,
     RunStore,
+    SqliteRunStore,
     StepOutcome,
 )
 from codeagent.orchestration.shared_memory import NullSupervisorMemoryWriter, SupervisorWriter
+from codeagent.orchestration.snapshot_store import SnapshotRunStore
 from codeagent.orchestration.step_scheduler import SchedulerResult, StepScheduler
 from codeagent.runtime.agent_runtime import WorkerRun
 from codeagent.tool.approval import ApprovalPolicy, DenyExternalApprovalPolicy
@@ -100,6 +103,7 @@ class MasterRuntime:
         trajectory_exporter: TrajectoryExporter | None = None,
         trajectory_timeout_seconds: float = 10.0,
         sandbox_manager: PodmanSandboxManager | None = None,
+        run_leases: RunLeaseManager | None = None,
     ) -> None:
         self._planner = planner
         self._scheduler = scheduler
@@ -110,6 +114,10 @@ class MasterRuntime:
         self._verify_command = verify_command
         self._memory_writer = memory_writer or NullSupervisorMemoryWriter()
         self._run_store = run_store or NullRunStore()
+        self._snapshot_store = SnapshotRunStore(self._run_store, workspace_manager.limits) if (
+            isinstance(self._run_store, SqliteRunStore)
+            and isinstance(workspace_manager, SnapshotWorkspaceManager)
+        ) else None
         self._metrics = metrics or Metrics()
         # A2：post-promote 执行被延后的外部动作。默认 fail-safe 拒绝；
         # 无 artifact_store 则只上报不执行。
@@ -119,17 +127,47 @@ class MasterRuntime:
         self._trajectory_exporter = trajectory_exporter
         self._trajectory_timeout = trajectory_timeout_seconds
         self._sandbox = sandbox_manager
+        self._run_leases = run_leases or RunLeaseManager(
+            self._run_store.run_lock_directory
+            if isinstance(self._run_store, SqliteRunStore) else None,
+        )
 
     async def run(
         self, task: str, *, session_id: str, cancellation=None,
         resume_master_run_id: str | None = None,
     ) -> FinalResult:
         master_run_id = resume_master_run_id or new_id("mrun")
-        if isinstance(self._wsm, SnapshotWorkspaceManager) and resume_master_run_id is not None:
+        if not self.supports_resume and resume_master_run_id is not None:
             return FinalResult(
                 task=task, accepted=False, integrated=False, master_run_id=master_run_id,
                 reason="非Git沙箱任务暂不支持resume；请核对实际成果后启动新任务",
             )
+        if cancellation is not None:
+            cancellation.raise_if_cancelled()
+        # Acquire before reading recovery state, planning, reclaiming or exporting.
+        # New runs hold the same lease so resume cannot steal an active new run.
+        try:
+            with self._run_leases.acquire(master_run_id):
+                return await self._run_owned(
+                    task, session_id=session_id, cancellation=cancellation,
+                    resume_master_run_id=resume_master_run_id, master_run_id=master_run_id,
+                )
+        except RunLockBusy:
+            self._metrics.incr("master.run_lock_busy")
+            return FinalResult(
+                task=task, accepted=False, integrated=False, master_run_id=master_run_id,
+                reason="该run正在由另一个调用或进程执行；请等待其结束后再恢复。",
+            )
+        except RunLockError as exc:
+            return FinalResult(
+                task=task, accepted=False, integrated=False, master_run_id=master_run_id,
+                reason=f"无法确认run执行权，拒绝运行：{exc}",
+            )
+
+    async def _run_owned(
+        self, task: str, *, session_id: str, cancellation,
+        resume_master_run_id: str | None, master_run_id: str,
+    ) -> FinalResult:
         path = error = None
         owns_snapshot = False
         with trace_scope(session_id=session_id, master_run_id=master_run_id,
@@ -137,7 +175,17 @@ class MasterRuntime:
             try:
                 snapshot = self._wsm if isinstance(self._wsm, SnapshotWorkspaceManager) else None
                 if snapshot is not None:
-                    snapshot.begin()
+                    checkpoint = None
+                    if resume_master_run_id is not None:
+                        assert self._snapshot_store is not None
+                        checkpoint = await self._snapshot_store.load(master_run_id)
+                        if checkpoint is None:
+                            return FinalResult(
+                                task=task, accepted=False, integrated=False,
+                                master_run_id=master_run_id,
+                                reason="旧非Git任务没有持久化快照，无法安全resume；请核对成果。",
+                            )
+                    snapshot.begin(master_run_id, checkpoint)
                     owns_snapshot = True
                 final = await self._run(
                     task, session_id=session_id, cancellation=cancellation,
@@ -151,10 +199,11 @@ class MasterRuntime:
                 if not isinstance(self._wsm, SnapshotWorkspaceManager):
                     raise
                 uncertain = isinstance(exc, PublicationUncertain) or self._wsm.published
-                await self._run_store.update_run_status(
-                    master_run_id, "unknown" if uncertain else
-                    "cancelled" if isinstance(exc, CancelledByUser) else "failed",
-                )
+                if owns_snapshot:
+                    await self._run_store.update_run_status(
+                        master_run_id, "unknown" if uncertain else
+                        "cancelled" if isinstance(exc, CancelledByUser) else "failed",
+                    )
                 final = FinalResult(
                     task=task, accepted=False, integrated=False, master_run_id=master_run_id,
                     reason=("写回结果待核对；不能认为全部成功或全部回滚。" if uncertain else "")
@@ -180,7 +229,8 @@ class MasterRuntime:
 
     @property
     def supports_resume(self) -> bool:
-        return not isinstance(self._wsm, SnapshotWorkspaceManager)
+        return (not isinstance(self._wsm, SnapshotWorkspaceManager)
+                or self._snapshot_store is not None)
 
     async def _run(
         self,
@@ -203,8 +253,12 @@ class MasterRuntime:
                 raise ValueError(f"找不到可恢复的 master run: {resume_master_run_id}")
             self._metrics.incr("master.resumes")
             recovery_git = git if isinstance(git, GitWorktreeWorkspaceManager) else None
-            recovered = await self._try_recover(record, recovery_git)
+            recovered = (await self._try_recover_snapshot(record, git)
+                         if isinstance(git, SnapshotWorkspaceManager) else
+                         await self._try_recover(record, recovery_git))
             if recovered is not None:
+                if not recovered.accepted:
+                    return recovered
                 # Git 成果已完成，仍须恢复同一 Attempt 的外部动作。
                 attempt_no = record.last_attempt.attempt_no if record.last_attempt else 1
                 pending = await self._run_store.load_deferred(record.master_run_id, attempt_no)
@@ -225,6 +279,13 @@ class MasterRuntime:
             master_run_id=master_run_id, session_id=session_id, task=task,
             graph=graph, status="running", original_base_sha=original_base,
         )
+        if isinstance(git, SnapshotWorkspaceManager) and self._snapshot_store is not None:
+            if resume_master_run_id is None:
+                assert original_base is not None
+                await self._snapshot_store.initialize(
+                    master_run_id, git.binding(), git.frozen_bytes(original_base),
+                )
+            git.checkpoint = await self._snapshot_store.load(master_run_id)
 
         async def _checkpoint(step_id: str, worker: WorkerRun, integrated: bool) -> None:
             await self._run_store.record_step(
@@ -264,6 +325,12 @@ class MasterRuntime:
                 trace_id=master_run_id, on_step_complete=_checkpoint, candidate=candidate,
             )
             candidate_sha = await git.head(candidate.root) if (git and candidate) else None
+            if isinstance(git, SnapshotWorkspaceManager) and self._snapshot_store is not None:
+                assert candidate_sha is not None
+                await self._snapshot_store.freeze(
+                    master_run_id, attempt_no, git.frozen_bytes(candidate_sha),
+                )
+                git.checkpoint = await self._snapshot_store.load(master_run_id)
             if candidate is not None:
                 await self._update_attempt(
                     master_run_id, attempt_no, AttemptState.CANDIDATE_FROZEN,
@@ -298,10 +365,21 @@ class MasterRuntime:
                 )
                 if isinstance(git, SnapshotWorkspaceManager) and cancellation is not None:
                     cancellation.raise_if_cancelled()
+                if isinstance(git, SnapshotWorkspaceManager) and self._snapshot_store is not None:
+                    git.checkpoint = await self._snapshot_store.prepare(
+                        master_run_id, attempt_no, candidate_sha,
+                    )
                 promoted = await git.promote(candidate_sha, expected_base=original_base)
+                if promoted and isinstance(git, SnapshotWorkspaceManager):
+                    if self._snapshot_store is not None:
+                        assert git.checkpoint is not None
+                        await self._snapshot_store.applied(master_run_id, git.checkpoint)
+                        git.acknowledge()
                 await self._discard_attempt(candidate, result)
                 if promoted:
-                    await self._update_attempt(master_run_id, attempt_no, AttemptState.PROMOTED)
+                    if (not isinstance(git, SnapshotWorkspaceManager)
+                            or self._snapshot_store is None):
+                        await self._update_attempt(master_run_id, attempt_no, AttemptState.PROMOTED)
                     integrated_ok, promoted_sha, reason = True, candidate_sha, verdict.reason
                     break
                 await self._update_attempt(
@@ -458,6 +536,59 @@ class MasterRuntime:
             records.append(record)
         return tuple(records)
 
+    async def _try_recover_snapshot(
+        self, record: RunRecord, workspace: SnapshotWorkspaceManager,
+    ) -> FinalResult | None:
+        state = workspace.checkpoint
+        assert state is not None and self._snapshot_store is not None
+        if record.original_base_sha != state.original_revision:
+            raise PublicationUncertain("run原始输入与持久化快照不符")
+        last = record.last_attempt
+        if state.publication_state in ('prepared', 'applied'):
+            if (last is None or last.attempt_no != state.candidate_attempt
+                    or last.candidate_sha != state.candidate_revision
+                    or last.state not in (AttemptState.PROMOTING, AttemptState.PROMOTED)):
+                raise PublicationUncertain("发布回执与Attempt记录不符")
+            has_handoff = workspace.has_applied_receipt()
+            if state.publication_state == 'applied' or has_handoff:
+                # SQLite durability precedes retirement of the filesystem handoff receipt.
+                await self._snapshot_store.applied(record.master_run_id, state)
+                workspace.acknowledge()
+                return replace(self._recovered_result(
+                    record, reason="写回已完成，恢复补记回执；未重复执行或写回",
+                ), files=workspace.published_files())
+        if record.status == 'success' or (last is not None and last.state == AttemptState.PROMOTED):
+            raise PublicationUncertain("缺少已完成发布的持久化回执")
+        if workspace.capture() != workspace.initial:
+            return FinalResult(
+                task=record.task, accepted=False, integrated=False,
+                master_run_id=record.master_run_id,
+                reason="真实目录已变化且没有完成写回的回执，保留文件并拒绝恢复发布。",
+            )
+        if last is not None and last.state == AttemptState.PROMOTING:
+            if (state.candidate is None or state.candidate_revision is None
+                    or state.candidate_attempt != last.attempt_no
+                    or state.candidate_revision != last.candidate_sha):
+                raise PublicationUncertain("已验收候选快照缺失或身份不符")
+            workspace.checkpoint = await self._snapshot_store.prepare(
+                record.master_run_id, last.attempt_no, state.candidate_revision,
+            )
+            if not await workspace.promote(
+                state.candidate_revision, expected_base=state.original_revision,
+            ):
+                raise PublicationUncertain("恢复发布时真实输入变化")
+            await self._snapshot_store.applied(record.master_run_id, workspace.checkpoint)
+            workspace.acknowledge()
+            return replace(self._recovered_result(
+                record, reason="恢复已验收的冻结候选并完成写回；未重跑Worker",
+            ), files=workspace.published_files())
+        if last is not None and last.state != AttemptState.DISCARDED:
+            await self._update_attempt(
+                record.master_run_id, last.attempt_no, AttemptState.DISCARDED,
+                verdict="restart_from_original(recover)",
+            )
+        return None
+
     async def _try_recover(
         self, record: RunRecord, git: GitWorktreeWorkspaceManager | None
     ) -> FinalResult | None:
@@ -519,11 +650,13 @@ class MasterRuntime:
     async def _reclaim_orphans(
         self, record: RunRecord, git: GitWorktreeWorkspaceManager | None
     ) -> None:
-        """回收崩溃遗留的孤儿 worktree/branch。resume 将开全新 attempt，旧分支全是孤儿。"""
+        """Only reclaim recorded branches of the exclusively owned run."""
         if git is None:
             return
         try:
-            removed = await git.reclaim_orphans(keep_branches=set())
+            branches = {a.candidate_branch for a in record.attempts if a.candidate_branch}
+            branches.update(o.branch_name for o in record.outcomes.values() if o.branch_name)
+            removed = await git.reclaim_orphans(only_branches=branches)
             if removed:
                 self._metrics.incr("master.orphans_reclaimed", removed)
         except Exception:

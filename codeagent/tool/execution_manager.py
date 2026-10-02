@@ -30,6 +30,7 @@ from codeagent.context.profile import ContextProfile
 from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.evidence.event_store import NullEventStore, RawEventStore
 from codeagent.evidence.models import AgentEvent, EventType, EvidenceRef, EvidenceType
+from codeagent.execution.download import ControlledDownloader
 from codeagent.infra import metrics as M
 from codeagent.infra.cancellation import CancellationToken, CancelledByUser
 from codeagent.infra.metrics import Metrics
@@ -94,10 +95,12 @@ class ToolExecutionManager:
         metrics: Metrics | None = None,
         command_policy: CommandPolicy | None = None,
         command_executor: CommandExecutor | None = None,
+        downloader: ControlledDownloader | None = None,
         approval_policy: ApprovalPolicy | None = None,
         require_sandbox: bool = False,
     ) -> None:
         self._registry = registry
+        self._downloader = downloader
         self._normalizer = normalizer
         self._artifacts = artifact_store
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -260,6 +263,7 @@ class ToolExecutionManager:
             allow_external_effects=scope.allow_external_effects,
             approval=self._approval,
             deferred=scope.deferred,
+            downloader=self._downloader,
         )
         keys = _resource_keys(tool, call)
 

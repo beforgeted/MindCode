@@ -26,7 +26,7 @@ from codeagent.workspace.manager import WorkspaceManager
 from codeagent.workspace.snapshot import SnapshotWorkspaceManager
 
 # 会"读"工作区、但读集可枚举的工具;run_command 读集不可知 → 保守判可能重叠。
-_READ_TOOLS = {"read_file", "grep", "read_artifact"}
+_READ_TOOLS = {"read_file", "grep", "read_artifact", "download_file"}
 _UNKNOWN_READ_TOOLS = {"run_command"}
 
 

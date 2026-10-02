@@ -20,6 +20,7 @@ from codeagent.context.token_estimator import HeuristicTokenEstimator
 from codeagent.evidence.artifact_store import FileArtifactStore
 from codeagent.evidence.jsonl_event_store import JsonlEventStore
 from codeagent.evidence.models import AgentEvent, EventType
+from codeagent.execution.download import ControlledDownloader
 from codeagent.execution.podman import PodmanSandboxManager
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.infra.ids import new_session_id
@@ -40,6 +41,7 @@ from codeagent.runtime.interactive_sandbox import InteractiveSandbox
 from codeagent.runtime.react_engine import ReActEngine
 from codeagent.tool.approval import DenyExternalApprovalPolicy, InteractiveApprovalPolicy
 from codeagent.tool.builtin import default_tools
+from codeagent.tool.builtin.download_file import DownloadFileTool
 from codeagent.tool.builtin.evidence_get import EvidenceGetTool
 from codeagent.tool.builtin.memory_get import MemoryGetTool
 from codeagent.tool.command_policy import CommandPolicy
@@ -122,6 +124,16 @@ class AgentSession:
                 EvidenceGetTool(self.event_store),
             ]
         )
+        approval = (
+            InteractiveApprovalPolicy()
+            if config.interactive_approval else DenyExternalApprovalPolicy()
+        )
+        downloader = None
+        if config.downloads.hosts:
+            self.registry.register(DownloadFileTool())
+            downloader = ControlledDownloader(
+                config.downloads, approval=approval, events=self.event_store,
+            )
         self.definition = definition or AgentDefinition(
             id="mindcode",
             name="MindCode",
@@ -162,11 +174,8 @@ class AgentSession:
                 extra_allow=list(config.command_allowlist),
                 extra_deny=list(config.command_denylist),
             ),
-            approval_policy=(
-                InteractiveApprovalPolicy()
-                if config.interactive_approval
-                else DenyExternalApprovalPolicy()
-            ),
+            approval_policy=approval,
+            downloader=downloader,
         )
         self.engine = ReActEngine(
             llm_client=llm_client,

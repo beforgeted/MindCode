@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from codeagent.context.profile import ContextProfile
+from codeagent.execution.download import DownloadPolicy
 from codeagent.execution.models import ExecutionLimits
 from codeagent.llm.routing import ModelRoutingConfig
 from codeagent.workspace.project_identity import resolve_project_identity
@@ -50,12 +51,15 @@ class AppConfig:
     execution_backend: str = "local"
     sandbox_image: str | None = None
     sandbox_limits: ExecutionLimits = field(default_factory=ExecutionLimits)
+    downloads: DownloadPolicy = field(default_factory=DownloadPolicy)
 
     def __post_init__(self) -> None:
         if self.execution_backend not in ("local", "podman"):
             raise ValueError("execution_backend must be local or podman")
         if self.execution_backend == "podman" and not self.sandbox_image:
             raise ValueError("podman requires CODEAGENT_SANDBOX_IMAGE (installed SHA256 ID)")
+        if self.downloads.hosts and self.execution_backend != "podman":
+            raise ValueError("controlled downloads require the Podman backend")
 
     @property
     def state_root(self) -> Path:
@@ -101,6 +105,10 @@ class AppConfig:
             models=ModelRoutingConfig.from_env(),
             execution_backend=os.environ.get("CODEAGENT_EXECUTION_BACKEND") or "local",
             sandbox_image=os.environ.get("CODEAGENT_SANDBOX_IMAGE") or None,
+            downloads=DownloadPolicy(
+                hosts=_env_patterns("CODEAGENT_DOWNLOAD_HOSTS"),
+                approval_mode=os.environ.get("CODEAGENT_DOWNLOAD_APPROVAL") or "prompt",
+            ),
         )
 
 

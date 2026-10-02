@@ -174,14 +174,16 @@ class GitWorktreeWorkspaceManager:
 
     # ---- 孤儿回收（P8d：崩溃遗留的 worktree/branch）----
 
-    async def reclaim_orphans(self, keep_branches: set[str] | None = None) -> int:
+    async def reclaim_orphans(
+        self, keep_branches: set[str] | None = None, *, only_branches: set[str] | None = None,
+    ) -> int:
         """回收 self._dir 下不在 keep_branches 的 worktree，并删除悬空 codeagent/* 分支。
 
         返回移除的 worktree 数。用于 resume 前清理上一次崩溃残留（此刻尚无新 candidate，
         keep 通常为空）。所有 git 失败都吞掉，回收是尽力而为、不阻断主流程。
         """
         keep = keep_branches or set()
-        return await asyncio.to_thread(self._reclaim_orphans_sync, keep)
+        return await asyncio.to_thread(self._reclaim_orphans_sync, keep, only_branches)
 
     def _list_worktrees(self) -> list[tuple[Path, str | None]]:
         out = _run_git(self._repo, "worktree", "list", "--porcelain")
@@ -200,10 +202,10 @@ class GitWorktreeWorkspaceManager:
                 path, branch = None, None
         return entries
 
-    def _reclaim_orphans_sync(self, keep: set[str]) -> int:
+    def _reclaim_orphans_sync(self, keep: set[str], only: set[str] | None) -> int:
         import os
 
-        dir_key = os.path.normcase(str(self._dir))
+        dir_key = os.path.normcase(str(self._dir)) + os.sep
         repo_key = os.path.normcase(str(self._repo))
         removed = 0
         for path, branch in self._list_worktrees():
@@ -214,15 +216,18 @@ class GitWorktreeWorkspaceManager:
                 continue
             if branch and branch in keep:
                 continue
+            if only is not None and branch not in only:
+                continue
             try:
                 _run_git(self._repo, "worktree", "remove", "--force", str(path))
             except GitWorktreeError:
                 shutil.rmtree(path, ignore_errors=True)
             removed += 1
-        try:
-            _run_git(self._repo, "worktree", "prune")
-        except GitWorktreeError:
-            pass
+        if only is None:
+            try:
+                _run_git(self._repo, "worktree", "prune")
+            except GitWorktreeError:
+                pass
         try:
             listing = _run_git(
                 self._repo, "branch", "--list", "codeagent/*", "--format", "%(refname:short)"
@@ -231,6 +236,8 @@ class GitWorktreeWorkspaceManager:
             listing = ""
         for b in (ln.strip() for ln in listing.splitlines() if ln.strip()):
             if b in keep:
+                continue
+            if only is not None and b not in only:
                 continue
             try:
                 _run_git(self._repo, "branch", "-D", b)

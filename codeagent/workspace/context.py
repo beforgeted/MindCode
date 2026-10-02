@@ -28,6 +28,8 @@ class WorkspaceContext:
     is_isolated: bool = False
     # 该 worktree 创建时的 base HEAD（git sha）。用于集成期检测"推测执行是否过期"（Phase 2）。
     base_revision: str | None = None
+    # Optional caller-owned task resource root, for crash-reclaimable handoff staging.
+    handoff_staging_root: Path | None = None
 
     @classmethod
     def local(cls, root: Path | str) -> WorkspaceContext:

@@ -9,7 +9,11 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 优化 **O1** 已实现：角色/模型调用归因、Attempt 状态历史与任务轨迹 JSON 导出。
 优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback（金额预算路由待做）。
 **B4/B5 沙箱**已接入 Git / 非 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
-离线执行与受校验快照回传。独立 Ubuntu VM 最新验收 **475 passed、1 skipped**，18 个真容器用例通过；真实 deepseek-flash 历史11场景和非Git任务正/负例均通过。
+离线执行与受校验快照回传。B5 一期新增受控 HTTPS 文件下载，容器仍断网。C6 同 run 跨进程恢复互斥、
+非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **611 passed、1 skipped**，
+30 个真容器用例通过；Windows **459 passed、153 skipped**，两端 Ruff/Pyright 通过。
+真实 deepseek-flash 历史11场景和非Git任务正/负例通过是此前阶段的模型回归；本期恢复测试用Stub固定
+模型步骤，容器与进程强杀是真实操作，下载回归使用真实HTTPS。
 详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
 
 ## 快速开始
@@ -255,7 +259,51 @@ python -m pytest -q tests/test_execution_snapshot.py tests/test_sandbox_workspac
 活跃实例保留；删除失败或存在性未知保留记录并拒绝继续。不扫描其他容器。
 独立 Ubuntu VM（`6.8.0-142-generic`）追加全量 **415 passed、1 skipped**，Ruff / Pyright 通过，
 8 个真容器用例和独立内核探针通过，容器清单为空；与此前 WSL2 395 / 1 分开记录。
-待完成：非 Git 任务持久化恢复、按需网络策略。资源账本不替代同 run 的跨进程恢复锁。
+待完成：更广的按需网络策略；非 Git持久化恢复见末节。受控文件下载见下节；资源账本与 C6 run 恢复锁职责不同，后者见下节。
+
+### 受控 HTTPS 文件下载（B5 第一期）
+
+Podman 模式可显式配置 `CODEAGENT_DOWNLOAD_HOSTS`（分号分隔的精确小写 DNS 主机名），
+配置后才注册 `download_file(url, sha256, path)`。空白名单默认不开放下载。
+
+```bash
+export CODEAGENT_DOWNLOAD_HOSTS='files.pythonhosted.org'
+# CODEAGENT_DOWNLOAD_APPROVAL 默认为 prompt：REPL 逐次询问，非交互默认拒绝。
+# 受信自动化可显式设为 allowlist，这是操作者的持续下载授权。
+```
+
+只允许 HTTPS:443 GET，无凭据、查询或片段。URL、精确域名、公网 DNS 在每个重定向跳重新检查；
+连接固定到已检查 IP，TLS 证书/SNI 仍按域名验证。可信下载子进程不继承 API 密钥或代理环境，
+默认最多 8 MiB、30 秒、3 次跳转；Python 调用方可通过 `DownloadPolicy` 在固定上限内调整。
+模型必须提供可信来源的 SHA256，下载成功不等于内容安全，摘要本身也不是供应链认证。
+
+授权请求前落盘审计意图；审计等待最多 5 秒，失败或卡住时不发请求。结束记录跳转/IP/状态/字节，
+不记录响应正文。超时或取消停止并等待子进程；已经发出的 GET 无法被候选回滚撤销。
+校验后的二进制只导入当前离线容器，路径锚定防链接逃逸，不覆盖不同内容的已有文件。
+`/task` 与普通交互都继续经过独立验收再发布；`downloaded` 审计状态只表示字节已校验。
+容器 shell 直接联网仍被阻断；工具不提供在线 pip/npm 安装、POST、发布或通用 TCP。
+
+本期独立 Ubuntu VM **562 passed、1 skipped**，27 个真容器用例通过；Windows **435 passed、128 skipped**，两端 Ruff / Pyright 通过；新增 9 个真容器下载用例覆盖二进制导入/复用/冲突/父目录链接、
+真实下载且直接 TCP 失败、任务与普通交互的接受/拒绝。Linux 仅在独立 VM
+`/home/mengx/mindcode-download-final.HSweo1` 验证，无容器残留，原仓库与历史失败现场保留。
+策略和复现见 [`NETWORK_DOWNLOAD_DESIGN.md`](NETWORK_DOWNLOAD_DESIGN.md) 及
+[`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。B5 整项仍未完成。
+
+### 同 run 跨进程恢复互斥（C6）
+
+默认 SQLite 装配自动为新任务与 `/task --resume` 取得同 run 内核租约；先持锁再读取恢复状态，
+锁覆盖编排、孤儿清理、验收/合并、外部动作、轨迹导出。另一进程立即返回忙碌，不能读旧状态后重复执行。
+同数据库路径使用同一锁目录；不同 run 不相互排斥。Linux 用 flock，Windows 用非阻塞字节锁。
+进程退出释放锁，锁文件保留；锁不可用拒绝运行，不能删文件或用 TTL 强行接管。
+
+RunStore 取消及重复取消时先等待 SQLite 线程结束，再释放 run 租约；恢复只回收当前 run 已记录的
+候选/Worker 分支，不对项目全局 prune，未知资源保留。默认 NullRunStore 只有同 Runtime 的进程内互斥，
+自定义持久化存储需要显式共享锁命名空间。保证限于同主机、同规范 SQLite 路径与受保护的本地控制目录。
+C6负责执行权互斥，不保证外部exactly-once；非Git恢复与staging回收已由末节机制补齐。
+
+独立 Ubuntu VM **580 passed、1 skipped**，27 个真容器用例通过；Windows **449 passed、132 skipped**，两端 Ruff/Pyright 通过；C6 专项18项计入 VM 全量，Windows其中4项POSIX路径保护跳过。
+真实双进程恢复/强杀接管、取消线程排空、导出持锁及其他 run 资源保留通过。下载/容器27项继续回归通过，
+本期没有重跑历史真实模型套件。设计与边界见 [`RUN_RECOVERY_LOCKING.md`](RUN_RECOVERY_LOCKING.md)。
 
 ### 延后外部动作的恢复边界（A2）
 
@@ -312,8 +360,8 @@ CODEAGENT_VERIFY_CMD；缺验收、失败或结果不确定均不接受，拒绝
 
 非 Git 任务取消先停止并等待所有 Worker 的容器清理，再删除私有 staging，RunStore 记录 cancelled。
 发布冲突或决定未知沿用“待核对”处理。当前 snapshot:<SHA256> 是内容修订标识，不是 Git SHA，
-candidate/worker 标识是内部引用。它们写入 RunStore 作 Attempt 观测，但候选数据尚未跨进程持久化。
-因此非 Git 沙箱 `/task --resume` 明确拒绝，不修改旧记录，CLI 也不提示可以恢复；请核对实际成果后新建任务。
+candidate/worker 标识是内部引用。以下是最初阶段的边界，本期持久化恢复已补齐，见末节。
+最初非 Git 沙箱 `/task --resume` 明确拒绝，不修改旧记录，CLI 也不提示可以恢复；请核对实际成果后新建任务。
 控制器 SIGKILL 后容器仍按资源账本精确回收；私有磁盘 staging 尚无跨进程自动清理，任务恢复与租约不能混淆。
 共享写回仍是逐文件事务：外部编辑器不遵守租约时存在检查/写入竞态，不提供全文件系统原子 CAS。
 
@@ -322,3 +370,21 @@ candidate/worker 标识是内部引用。它们写入 RunStore 作 Attempt 观�
 非Git任务正/负例 **2/2通过**，并验证任务后普通交互；verify_fail拒绝两次Attempt后base不推进且无note.txt。
 之后VM全量重新通过475 / 1（18真容器），Windows重新通过357 / 119，静态检查通过，无容器残留。
 原仓库与历史失败现场保留，未使用WSL；证据和单次评测边界见Linux沙箱验收记录末节。
+
+
+### 非Git任务持久化恢复与staging回收（2026-10-02）
+
+独立 Ubuntu VM **611 passed、1 skipped**，30 个真容器用例通过；Windows **459 passed、153 skipped**，两端 Ruff/Pyright 通过。新增31项计入全量，含3项真实Podman控制器SIGKILL窗口；恢复专项62项通过，
+不与全量相加。模型用Stub固定步骤，历史真实LLM11/11与非Git2/2仍是此前独立证据。
+
+默认SQLite装配支持非Git /task --resume：保存原始/最新冻结快照、目录身份/策略绑定和发布回执。
+未到PROMOTING从保存DAG和原始输入重跑；PROMOTING复用已验收候选，只重试发布；
+applied文件日志先保留，SQL FULL同步记账后退休，恢复不重复写回，发布后人工修改保留。
+无回执而目录变化时即便恰好等于候选也拒绝，损坏记录和身份不符均保留供核对。
+新staging账本先持owner租约并记意图，再mkdir/绑定inode/写数据；只回收已记账且owner已退出的目录。
+候选、Worker、validation及交接临时目录均在owner根下；活动/未知目录保留，替换/链接/删除失败不猜删。
+旧run无快照、NullRunStore或无适配器定制存储仍拒绝resume；跨run归档、外部编辑器全局CAS及分布式恢复待设计。
+设计与边界见 [NON_GIT_RECOVERY_DESIGN.md](NON_GIT_RECOVERY_DESIGN.md)。
+
+下一项R1定价/动态预算路由；B5通用联网及Phase2/3仍按任务清单推进。当前B5/C6及本期新改动尚未提交。
+带日期的旧段落保留当时证据，当前状态以本节和开头进度为准。

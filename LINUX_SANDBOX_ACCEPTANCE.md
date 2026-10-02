@@ -1,6 +1,6 @@
 # Linux Podman 分环境验收记录
 
-2026-10-02 当前最终版本：独立 Ubuntu VM **475 passed、1 skipped**，18 个真容器用例通过；另完成真实模型历史11/11与非Git2/2复验；Ruff / Pyright 通过，容器清单为空。
+2026-10-02 当前最终版本：独立 Ubuntu VM **611 passed、1 skipped**，30 个真容器用例通过；Windows **459 passed、153 skipped**，两端 Ruff/Pyright 通过，容器清单为空。非Git恢复验收见末节；真实模型历史11/11与非Git2/2是此前阶段的独立记录。
 
 以下先保留此前 WSL2 一期结果，独立 VM 追加实现与证据见文末。
 
@@ -275,3 +275,104 @@ VM全量XML/log、静态检查、退出码及容器清单。完整场景目录�
 
 当前非Git/task提交门槛通过。下一项按实际需求推进B5网络策略；非Git候选持久化/发布回执、磁盘staging
 崩溃回收与C6同run恢复锁仍未实现，Phase1动态预算路由、Phase2/3专项未完成。
+
+
+## 2026-10-02 追加：B5 受控 HTTPS 下载，容器继续离线
+
+Linux 测试只在 `mengx@192.168.100.128` 的独立 Ubuntu VM 进行。最终源码目录
+`/home/mengx/mindcode-download-final.HSweo1`，191 个源码/测试/场景/配置文件逐一核验 SHA256；
+复用原仓库依赖包，但 `python -I` 确认 codeagent 导入最终快照。原仓库、env、Git HEAD/status 和历史012失败产物哈希保持不变。
+镜像复用受信离线 pytest 镜像完整 ID `0f8a779567c977206c4e1a3985a37fa46cf25d93d767ed93dd866c8670c140a5`。
+
+独立 Ubuntu VM **562 passed、1 skipped**，27 个真容器用例通过；Windows **435 passed、128 skipped**，两端 Ruff / Pyright 通过，容器清单最终为空。78 项下载策略/控制面专项已包含在全量中；新增 9 个真容器用例，
+连同原有 18 项共 27 项，通过数不相加。下载接线使用 Stub 固定模型行为，不代表本期新增真实 LLM 质量证据。
+真实外部下载是 PyPI iniconfig 2.3.0 wheel，7484 字节，SHA256
+`f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12`，
+先从 PyPI 官方 JSON 校验文件 URL/摘要，并与上一阶段受信镜像的 wheel 清单和实际字节一致。
+
+真容器用例覆盖二进制导入、同摘要复用、不同内容不覆盖、父目录符号链接拒绝；实际 HTTPS 下载的字节
+进入 Podman，而容器内对 1.1.1.1:443 直接 TCP 连接失败。错误 hash 不覆盖用户文件。
+非 Git /task 与普通交互各有接受/拒绝用例：接受者校验最终 wheel 内容，拒绝者确认 Worker/交互执行成功后
+被独立 false 验收拒绝、用户目录不出现 wheel；env/user.txt 保留、未创建 .git。
+
+确定性策略测试覆盖每跳域名与 DNS、混合私网结果、重绑定、跳转循环、TLS 证书失败、内容超限/不完整/编码/hash、
+未审批不启动请求、实际可信子进程不含 API 密钥和代理、取消/超时排空，以及审计卡死时有限等待且不请求。
+DNS/TLS/取消部分采用固定替身验证机制；真实公网下载和实际容器阻断是另一组证据，不互相冒充。
+
+审计失败边界来自代码审查：事件写者异常可能让 queue.join 永久等待；下载意图/结束 flush 现在各有 5 秒上限，
+开始审计未完成就不出站。此项是故障注入验证，不声称生产发生过攻击。第一次专项测试的 Stub 构造漏脚本已修正，
+属于测试代码问题。初轮 VM 快照保留在 `mindcode-download-validation.SC0WeT`（86 项专项），
+随后增加审计卡死回归后在新目录完成最终复验；最终数字只取新快照。
+
+本地证据 `.codeagent/validation/vm-download-final/` 包括全量 XML/日志、静态检查、源码清单、镜像信息、
+公共 fixture、原始基线、最终清单与 download-summary.json；Windows XML/日志独立保存。
+复现仅在授权的独立 Ubuntu VM 执行，显式设置 MINDCODE_PODMAN_TEST_IMAGE、
+MINDCODE_DOWNLOAD_TEST_URL 与 MINDCODE_DOWNLOAD_TEST_SHA256，再运行 `python -m pytest -q`。
+这些测试变量不改变应用默认下载配置；不要直接复制到未授权公网目的地。
+
+B5 整项仍未完成：下载由可信控制面代理，容器没有直接网络出口；路径可包含模型已知信息，白名单不保证无数据泄露，
+GET 已发出后不能回滚。模型提交 SHA256 只证明内容符合该摘要，可信性仍由操作者核对来源/摘要。
+后续在线包管理/通用出口另行设计；C6、非 Git 恢复和 staging 回收未因此完成。
+
+
+## 2026-10-02 追加：C6 同 run 跨进程恢复锁
+
+Linux 测试仅在独立 Ubuntu VM `mengx@192.168.100.128`。最终源码目录
+`/home/mengx/mindcode-c6-final.LEwEue`，195个源码/配置/测试/场景文件SHA256逐项核对；
+独立venv仅复用原仓库依赖目录，`python -I`确认加载新源码。镜像继续复用0f8a779...完整SHA256受信镜像，
+B5公共fixture重新核对PyPI官方摘要。原仓库env、Git HEAD/status及历史012失败产物哈希均不变。
+
+独立 Ubuntu VM **580 passed、1 skipped**，27 个真容器用例通过；Windows **449 passed、132 skipped**，两端 Ruff/Pyright 通过。恢复专项41项计入全量，18个C6新用例包含真实子进程持锁及双控制进程
+MasterRuntime恢复/强杀接管（正常/强杀共4项）、不同run独立、永久锁inode、内核锁失败拒绝、
+Linux链接/多硬链接/FIFO/宽权限拒绝、取消/重复取消排空SQLite线程、规划前持锁、导出期持锁、
+忙碌者不读记录/不导出及只清理当前run资源。Windows中4个POSIX保护测试跳过，其余通过。
+
+真实恢复用例从已promote且有待执行append的记录起步：A持锁停在审批，B返回忙碌、无文件副作用且业务状态
+不变；A正常完成后再恢复不重复append；A在执行前被SIGKILL后新进程取得锁并执行一次。这个强杀用例证明
+控制器锁释放与执行前接管；执行后记账失败的unknown行为仍由原A2故障注入回归覆盖，不能冒称外部exactly-once。
+新增C6用例用固定规划/直接恢复，不调用真实LLM；27项真实Podman与B5真实HTTPS作为已有能力回归。
+
+审查发现的两个配套问题：原resume项目全局清理可能删除其他run候选，现在只按RunRecord已记账分支清理，
+不做全局prune，未记录归属的Git资源保留；原to_thread取消会留下SQLite操作，现在在持锁期间排空，
+重复取消也不能让旧写者越过租约释放。这个等待保证退出顺序，磁盘永久挂起时不能许诺立即取消。
+
+首轮VM快照保留在 `mindcode-c6-validation.9oXA1E`；补齐SQLite取消排空后，最终在新目录完整复验。
+Windows首轮失败日志保留：TaskGraph重载对象身份误比较、独立store漏start、把持锁者补记success误认为
+竞争者修改；均修正测试装配/比较基线。初轮静态问题为平台API类型与测试协议签名，不宣称产品发生并发事故。
+本地证据 `.codeagent/validation/vm-c6-final/`：XML/日志、静态检查、源码清单、镜像信息、保护基线、
+最终容器清单和c6-summary.json；Windows单独XML/日志。专项、首轮与全量通过数不相加。
+
+C6勾选限于同主机同规范SQLite路径的内核互斥；本地控制目录需受保护，网络文件系统/多主机/不同复制状态库
+不在保证范围。锁文件不得unlink强占。NullRunStore只有同Runtime进程内保护，定制持久化存储需注入共享租约。
+P8恢复判断、A2unknown/尝试预算与容器资源账本继续各负其责；非Gitresume、发布回执持久化、staging回收未完成。
+
+
+## 2026-10-02 追加：非Git恢复、发布回执与staging回收
+
+Linux仅在独立Ubuntu VM mengx@192.168.100.128。最终现场/home/mengx/mindcode-snapshot-final.8JsDNn；
+202份源码/配置/测试/场景文件逐项SHA256核对；独立venv复用已有依赖，python -I确认加载最终源码。
+独立 Ubuntu VM **611 passed、1 skipped**，30 个真容器用例通过；Windows **459 passed、153 skipped**，两端 Ruff/Pyright 通过；恢复专项62项计入全量。新增31项由10项存储、9项Linux恢复、
+9项资源回收与3项真实Podman恢复组成；Windows新增21项Linux专属跳过。
+真实Podman30项为原18项集成+9项下载+新3项恢复，不包含mock Podman单元测试。
+
+3个真实SIGKILL窗口均先完成Worker与独立验收：
+日志prepared前中断，真实输入未变，恢复仅重试冻结候选发布；
+首次差异写回后中断，prepared先回滚再发布已验收候选；
+applied决定后、SQL未ack中断，恢复补记回执，不重复写回并保留人工后续修改。
+每项由另一真实进程resume，再次resume仍不追加，scheduler为空，staging和容器最终无残留。
+其他覆盖：未完成验收从原始输入/DAG重跑、缺快照旧记录保留、绑定/内容损坏拒绝、
+无回执但内容恰好等于候选拒绝、未确认交接阻止其他run、owner SIGKILL后精确GC、
+活动/未知目录保留、inode替换/链接/非空未绑定意图与删除失败拒绝。
+文件交接临时目录纳入task owner根；不扫描/tmp猜归属。
+
+首轮现场/home/mengx/mindcode-snapshot-recovery.091xxR保留，专项一次失败是rmtree替身漏
+avoids_symlink_attacks属性，修正后62项通过。Windows首轮执行标志误传与TaskGraph对象身份比较、
+平台静态类型问题均修正，日志保留；不宣称实际生产事故，最终在新VM目录完整复验。
+本地证据.codeagent/validation/vm-snapshot-final/含XML/日志、静态检查、源码清单、镜像信息、
+原仓库保护基线、最终容器清单与snapshot-summary.json；Windows单独XML/日志。
+原仓库env、Git HEAD/status及历史012失败产物哈希均保持不变，未用WSL。
+
+边界：Linux非Git Podman任务、本地受保护SQLite/状态目录；SQL FULL回执确认后退休日志。
+没有新真实LLM评测，SIGKILL不等于停电/硬件故障验证，多文件写回不是针对外部编辑器的全局CAS。
+每run只保留原始和最新冻结快照，跨run归档/配额待做；NullRunStore/无适配器存储仍拒绝resume。
+Git未知资源及其他类别临时目录未统一GC。B5通用网络、R1预算与Phase2/3未完成。

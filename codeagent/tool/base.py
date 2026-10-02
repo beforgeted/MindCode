@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from codeagent.evidence.artifact_store import ArtifactStore
+from codeagent.execution.download import ControlledDownloader
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.llm.types import ToolSpec
 from codeagent.tool.approval import ApprovalPolicy, DenyExternalApprovalPolicy
@@ -53,6 +54,7 @@ class ToolExecutionContext:
     approval: ApprovalPolicy = field(default_factory=DenyExternalApprovalPolicy)
     # 推测期被拦下的外部副作用记录到这里（run 级队列），供 promote 后处理。None=不收集。
     deferred: list[DeferredAction] | None = None
+    downloader: ControlledDownloader | None = None
 
 
 @runtime_checkable

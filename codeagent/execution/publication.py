@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from collections.abc import Callable
 from pathlib import Path
@@ -40,12 +41,14 @@ class WorkspacePublication:
     def __init__(
         self, root: Path, directory: Path, *, limits: SnapshotLimits = SnapshotLimits(),
         guard: Callable[[], str] = lambda: "",
+        task_run_id: str | None = None,
     ):
         self.root, self.directory, self.limits, self.guard = root, directory, limits, guard
         self.root_fd = _open_directory(root)
         self.directory_fd = -1
         self.lock_fd = -1
         self.nonce = uuid4().hex
+        self.task_run_id = task_run_id
         try:
             uid = _required_attribute(os, "geteuid")()
             if os.fstat(self.root_fd).st_uid != uid:
@@ -150,7 +153,14 @@ class WorkspacePublication:
     def publish(
         self, initial: TreeSnapshot, output: TreeSnapshot, *,
         capture: Callable[[], TreeSnapshot], expected_guard: str,
+        transaction: dict | None = None,
     ) -> None:
+        if self._read_record() is not None:
+            raise PublicationUncertain("已有待确认的任务发布回执；请先恢复对应run")
+        if transaction is not None:
+            self._validate_transaction(transaction)
+            if transaction['run_id'] != self.task_run_id:
+                raise PublicationUncertain('publication belongs to another run')
         validate_snapshot(initial, self.limits)
         validate_snapshot(output, self.limits)
         before = {entry.path: entry for entry in initial.entries}
@@ -196,6 +206,8 @@ class WorkspacePublication:
             "initial": json.loads(encode_snapshot(initial, self.limits)),
             "output": json.loads(encode_snapshot(output, self.limits)),
         }
+        if transaction is not None:
+            record['transaction'] = transaction
         self._save(record)
         committing = False
         try:
@@ -227,10 +239,43 @@ class WorkspacePublication:
             except Exception as exc:
                 raise PublicationUncertain("写回结果待核对；回滚冲突，已保留恢复记录") from exc
             raise
-        try:
-            self._retire()
-        except OSError:
-            pass  # The durable applied decision is authoritative; retire on reopen.
+        if transaction is None:
+            try:
+                self._retire()
+            except OSError:
+                pass  # The durable applied decision is authoritative; retire on reopen.
+
+    @staticmethod
+    def _validate_transaction(value: object) -> None:
+        if (not isinstance(value, dict)
+                or set(value) != {'run_id', 'attempt_no', 'revision', 'receipt_id'}
+                or not isinstance(value['run_id'], str) or not 1 <= len(value['run_id']) <= 256
+                or type(value['attempt_no']) is not int or value['attempt_no'] < 1
+                or not isinstance(value['revision'], str)
+                or re.fullmatch('snapshot:[0-9a-f]{64}', value['revision']) is None
+                or not isinstance(value['receipt_id'], str)
+                or re.fullmatch('[0-9a-f]{32}', value['receipt_id']) is None):
+            raise PublicationUncertain('invalid publication transaction identity')
+
+    def applied_transaction(self, transaction: dict, initial: TreeSnapshot,
+                            output: TreeSnapshot) -> bool:
+        record = self._read_record()
+        if record is None:
+            return False
+        self._validate_transaction(record.get('transaction'))
+        if (record['state'] != 'applied' or record['transaction'] != transaction
+                or decode_snapshot(json.dumps(record['initial']).encode(), self.limits) != initial
+                or decode_snapshot(json.dumps(record['output']).encode(), self.limits) != output):
+            raise PublicationUncertain('journal and RunStore publication receipt disagree')
+        return True
+
+    def acknowledge(self, transaction: dict) -> None:
+        record = self._read_record()
+        if record is None:
+            return
+        if record.get('state') != 'applied' or record.get('transaction') != transaction:
+            raise PublicationUncertain('cannot retire another publication receipt')
+        self._retire()
 
     def _read_record(self) -> dict | None:
         try:
@@ -267,7 +312,14 @@ class WorkspacePublication:
                 or any(c not in "0123456789abcdef" for c in nonce)):
             raise PublicationUncertain("写回记录 nonce 无效")
         self.nonce = nonce
+        transaction = record.get('transaction')
+        if transaction is not None:
+            self._validate_transaction(transaction)
         if record["state"] == "applied":
+            if transaction is not None:
+                if transaction['run_id'] != self.task_run_id:
+                    raise PublicationUncertain("任务写回已完成但回执待记账，请先resume对应run")
+                return  # Keep the handoff evidence until the RunStore acknowledges it.
             self._retire()
             return
         initial = decode_snapshot(json.dumps(record["initial"]).encode(), self.limits)

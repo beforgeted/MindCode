@@ -1,15 +1,16 @@
 """Private non-Git task candidates; shared files are touched only at acceptance.
 
 Revisions are content hashes, and references are private bookkeeping identifiers.
-They are not Git objects. Task resume is deliberately rejected: filesystem content
-alone cannot prove ownership of a previous publication after its journal retires.
+They are not Git objects. Recovery restores bounded original/frozen snapshots
+and a RunStore publication receipt; matching filesystem bytes are never a receipt.
 """
 from __future__ import annotations
 
 import difflib
 import hashlib
+import os
 import shutil
-import tempfile
+from dataclasses import asdict
 from pathlib import Path
 
 from codeagent.agent.models import FileChangeKind, FileState
@@ -20,10 +21,13 @@ from codeagent.execution.snapshot import (
     SnapshotLimits,
     TreeSnapshot,
     apply_snapshot,
+    decode_snapshot,
     encode_snapshot,
 )
+from codeagent.execution.task_staging import TaskStaging
 from codeagent.execution.workspace import capture_workspace, publish_workspace
 from codeagent.infra.ids import new_id
+from codeagent.orchestration.snapshot_store import SnapshotCheckpoint
 from codeagent.workspace.context import WorkspaceContext
 from codeagent.workspace.manager import _is_git_worktree
 
@@ -44,8 +48,11 @@ class SnapshotWorkspaceManager:
         self.excluded = frozenset(excluded)
         key = hashlib.sha256(str(self.root).encode()).hexdigest()[:24]
         self.directory = state_root / "publication" / key
+        self.staging_directory = state_root / 'task-staging' / key
         self._publication: WorkspacePublication | None = None
-        self._temporary: tempfile.TemporaryDirectory | None = None
+        self._staging: TaskStaging | None = None
+        self.checkpoint: SnapshotCheckpoint | None = None
+        self.run_id: str | None = None
         self._snapshots: dict[str, TreeSnapshot] = {}
         self._refs: dict[str, str] = {}
         self._workspaces: dict[str, WorkspaceContext] = {}
@@ -60,28 +67,45 @@ class SnapshotWorkspaceManager:
     def capture(self) -> TreeSnapshot:
         return capture_shared(self.root, self.limits, git=False, excluded=self.excluded)
 
-    def begin(self) -> None:
+    def binding(self) -> dict:
+        if self._publication is None:
+            raise SandboxError('snapshot publication lease unavailable')
+        info = os.fstat(self._publication.root_fd)
+        return {'root': str(self.root), 'identity': [info.st_dev, info.st_ino],
+                'limits': asdict(self.limits), 'excluded': sorted(self.excluded)}
+
+    def begin(
+        self, run_id: str | None = None, checkpoint: SnapshotCheckpoint | None = None,
+    ) -> None:
         if self._publication is not None:
             raise SandboxError("同一非Git任务管理器已有执行中的任务")
         if _is_git_worktree(self.root):
             raise SandboxError("项目已成为Git工作区，需要重新装配任务")
-        self._publication = WorkspacePublication(self.root, self.directory, limits=self.limits)
+        self._publication = WorkspacePublication(
+            self.root, self.directory, limits=self.limits, task_run_id=run_id,
+        )
         try:
-            self.initial = self.capture()
+            self.run_id, self.checkpoint = run_id, checkpoint
+            if checkpoint is not None and checkpoint.binding != self.binding():
+                raise SandboxError('恢复目录身份、排除策略或快照限额与记录不符')
+            self.initial = (self.capture() if checkpoint is None else
+                            decode_snapshot(checkpoint.initial, self.limits))
             self.published = False
             self.output = None
             self._remember(self.initial)
-            self._temporary = tempfile.TemporaryDirectory(prefix="mindcode-task-")
+            if checkpoint is not None and checkpoint.candidate is not None:
+                self._remember(decode_snapshot(checkpoint.candidate, self.limits))
+            self._staging = TaskStaging(self.staging_directory, str(self.root))
         except BaseException:
             self.end()
             raise
 
     def end(self) -> None:
         try:
-            if self._temporary is not None:
-                self._temporary.cleanup()
+            if self._staging is not None:
+                self._staging.close()
         finally:
-            self._temporary = None
+            self._staging = None
             if self._publication is not None:
                 self._publication.close()
             self._publication = None
@@ -90,6 +114,8 @@ class SnapshotWorkspaceManager:
             self._workspaces.clear()
             self.initial = self.output = None
             self.published = False
+            self.checkpoint = None
+            self.run_id = None
 
     def _remember(self, snapshot: TreeSnapshot) -> str:
         revision = "snapshot:" + hashlib.sha256(encode_snapshot(snapshot, self.limits)).hexdigest()
@@ -105,16 +131,17 @@ class SnapshotWorkspaceManager:
         )
 
     def _create(self, snapshot: TreeSnapshot, kind: str) -> WorkspaceContext:
-        if self._temporary is None:
+        if self._staging is None:
             raise SandboxError("非Git任务尚未开始")
         identity = new_id(kind)
-        path = Path(self._temporary.name) / identity
+        path = self._staging.root / identity
         path.mkdir(mode=0o700)
         apply_snapshot(snapshot, path, self.limits)
         revision = self._remember(snapshot)
         workspace = WorkspaceContext(
             root=path, worktree_id=identity, branch_name=identity,
             is_isolated=True, base_revision=revision,
+            handoff_staging_root=self._staging.root,
         )
         self._workspaces[identity] = workspace
         self._refs[identity] = revision
@@ -145,6 +172,8 @@ class SnapshotWorkspaceManager:
         }
         if self.initial is not None:
             retained.add(self._remember(self.initial))
+        if self.checkpoint is not None and self.checkpoint.candidate_revision is not None:
+            retained.add(self.checkpoint.candidate_revision)
         self._snapshots = {key: value for key, value in self._snapshots.items() if key in retained}
 
     async def head(self, root: Path) -> str:
@@ -214,10 +243,33 @@ class SnapshotWorkspaceManager:
             return False
         self._publication.publish(
             self.initial, self._snapshots[candidate_sha], capture=self.capture, expected_guard="",
+            transaction=self.checkpoint.transaction(self.run_id) if self.checkpoint is not None
+            and self.checkpoint.publication_state == 'prepared'
+            and self.run_id is not None else None,
         )
         self.output = self._snapshots[candidate_sha]
         self.published = True
         return True
+
+    def frozen_bytes(self, revision: str) -> bytes:
+        return encode_snapshot(self._snapshots[revision], self.limits)
+
+    def has_applied_receipt(self) -> bool:
+        if self.checkpoint is None or self.checkpoint.candidate_revision is None:
+            return False
+        assert self._publication is not None and self.initial is not None
+        assert self.run_id is not None
+        return self._publication.applied_transaction(
+            self.checkpoint.transaction(self.run_id), self.initial,
+            self._snapshots[self.checkpoint.candidate_revision],
+        )
+
+    def acknowledge(self) -> None:
+        assert self.checkpoint is not None and self.run_id is not None
+        assert self._publication is not None and self.checkpoint.candidate_revision is not None
+        self.output = self._snapshots[self.checkpoint.candidate_revision]
+        self.published = True
+        self._publication.acknowledge(self.checkpoint.transaction(self.run_id))
 
     def published_files(self) -> tuple[FileState, ...]:
         if not self.published or self.initial is None or self.output is None:
