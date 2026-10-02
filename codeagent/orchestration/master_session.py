@@ -82,6 +82,7 @@ async def build_master(
     llm_client = attach_routing(
         llm_client, config.models, metrics=metrics, events=event_store, session_id="",
         costs=config.costs, cost_store=CostStore(config.state_root / 'runs.db'),
+        capabilities=config.capabilities if config.capabilities.models else None,
     )
     sandbox = None
     if config.execution_backend == "podman":

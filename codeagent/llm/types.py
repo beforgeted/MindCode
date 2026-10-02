@@ -9,7 +9,7 @@ from codeagent.llm.message import Block, ToolUseBlock
 class ModelConfig:
     model: str = "claude-sonnet-5"
     max_output_tokens: int = 8192
-    temperature: float = 1.0
+    temperature: float | None = 1.0
     context_window: int = 200_000
     # 压缩的 Map 阶段是纯结构化抽取，用便宜快的模型；
     # Reduce 要判断状态冲突和取舍，用主模型。见 P2。

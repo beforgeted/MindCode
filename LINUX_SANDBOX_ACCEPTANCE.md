@@ -403,3 +403,21 @@ R1二期完成范围是显式价格和软Worker阈值路由，默认配置兼容
 不承诺硬账单上限、跨账号预算、真实省钱比例/质量不降，也不自动识别合同折扣或1小时缓存写等价阶。
 旧run没有成本覆盖不能伪造成零；预算决策来自同RunStore同步成本，不来自异步事件。
 通用任务特征/完整模型能力、硬预算与真实质量成本评测仍待做。上一阶段提交92c88d1；本期未提交。
+
+
+## 2026-10-03 追加：模型能力与上下文适配
+
+R1二期已提交dbae3a7，本期模型能力适配已验收并随本次提交归档。独立Ubuntu VM mengx@192.168.100.128，
+新验证目录/home/mengx/mindcode-capabilities.9KdwAz；没有运行WSL测试。
+独立 Ubuntu VM **685 passed、1 skipped**，30 个真容器用例通过；Windows **533 passed、153 skipped**，两端 Ruff/Pyright 通过。38项新增与104项专项均计入全量；30个真实Podman用例为既有隔离、下载和强杀恢复回归。
+207份源码/配置/测试/场景SHA256核对；新venv复用已安装依赖，python -I确认新源码。
+原/home/mengx/MindCode的env/Git HEAD/status及历史012产物摘要一致，最终容器清单为空。
+证据.codeagent/validation/vm-capabilities/包括XML/日志、capabilities-summary.json、源清单、镜像/依赖与保护基线。
+Windows证据为windows-capabilities-full.xml/log及ruff/pyright日志；专项数字由全量和vm-unit.xml核对，不混加。
+
+主模型小窗口输出限制、备用独立参数、工具历史、图片payload/摘要、候选缺元数据、价格冲突、
+大上下文备用跳过、继续第三候选、经济模型图片不支持保留主模型、保留用户较小窗口、
+AgentSession真实prepare预算、全部七类角色/计数、事件故障与轨迹导出均覆盖。
+初次SSH因虚拟机未启动超时，用户重启后成功；首次本地测试用pytest保留名request导致收集失败，已修正。
+能力/费用仍使用固定Provider；没有新增付费LLM质量或成本节省评测，不能将控制流回归当成供应商效果。
+当前只完成五项显式门禁与Worker消息预算，启发式不保证供应商精确计数；Map/Reduce chunk和完整参数协商待做。

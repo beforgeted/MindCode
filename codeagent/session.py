@@ -73,6 +73,7 @@ class AgentSession:
             llm_client, config.models, metrics=self.metrics,
             events=self.event_store, session_id=self.session_id,
             costs=config.costs, cost_store=CostStore(config.state_root / 'runs.db'),
+            capabilities=config.capabilities if config.capabilities.models else None,
         )
         llm_client = self.llm_client
         self.artifact_store = FileArtifactStore(config.state_root)

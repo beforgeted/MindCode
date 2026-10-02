@@ -8,6 +8,7 @@ from pathlib import Path
 from codeagent.context.profile import ContextProfile
 from codeagent.execution.download import DownloadPolicy
 from codeagent.execution.models import ExecutionLimits
+from codeagent.llm.capabilities import CapabilityConfig
 from codeagent.llm.pricing import CostConfig
 from codeagent.llm.routing import ModelRoutingConfig
 from codeagent.workspace.project_identity import resolve_project_identity
@@ -50,6 +51,7 @@ class AppConfig:
     interactive_approval: bool = False
     models: ModelRoutingConfig = field(default_factory=ModelRoutingConfig)
     costs: CostConfig = field(default_factory=CostConfig)
+    capabilities: CapabilityConfig = field(default_factory=CapabilityConfig)
     execution_backend: str = "local"
     sandbox_image: str | None = None
     sandbox_limits: ExecutionLimits = field(default_factory=ExecutionLimits)
@@ -106,6 +108,7 @@ class AppConfig:
             command_denylist=_env_patterns("CODEAGENT_CMD_DENY"),
             models=ModelRoutingConfig.from_env(),
             costs=CostConfig.from_env(),
+            capabilities=CapabilityConfig.from_env(),
             execution_backend=os.environ.get("CODEAGENT_EXECUTION_BACKEND") or "local",
             sandbox_image=os.environ.get("CODEAGENT_SANDBOX_IMAGE") or None,
             downloads=DownloadPolicy(

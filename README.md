@@ -10,7 +10,7 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback；R1二期显式定价、持久化成本与Worker阈值降级也已实现。
 **B4/B5 沙箱**已接入 Git / 非 Git 普通交互、`/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
 离线执行与受校验快照回传。B5 一期新增受控 HTTPS 文件下载，容器仍断网。C6 同 run 跨进程恢复互斥、
-非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **647 passed、1 skipped**，30 个真容器用例通过；Windows **495 passed、153 skipped**，两端 Ruff/Pyright 通过。
+非 Git任务持久化恢复与staging崩溃回收也已完成。最新独立 Ubuntu VM **685 passed、1 skipped**，30 个真容器用例通过；Windows **533 passed、153 skipped**，两端 Ruff/Pyright 通过。
 真实 deepseek-flash 历史11场景和非Git任务正/负例通过是此前阶段的模型回归；本期恢复测试用Stub固定
 模型步骤，容器与进程强杀是真实操作，下载回归使用真实HTTPS。
 详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
@@ -392,7 +392,7 @@ applied文件日志先保留，SQL FULL同步记账后退休，恢复不重复�
 ### R1二期：显式定价与Worker成本阈值路由（2026-10-02）
 
 独立 Ubuntu VM **647 passed、1 skipped**，30 个真容器用例通过；Windows **495 passed、153 skipped**，两端 Ruff/Pyright 通过。新增36项计入全量，金额/路由/轨迹专项66项通过，不另加总。
-上一阶段B5/C6及非Git恢复已提交92c88d1；本期新改动尚未提交。
+B5/C6及非Git恢复已提交92c88d1；R1二期已提交dbae3a7。
 
 CODEAGENT_MODEL_PRICES指定USD/百万token价格JSON；CODEAGENT_WORKER_COST_THRESHOLD_USD与
 CODEAGENT_MODEL_ECONOMY_WORKER成对启用Worker阈值降级，默认不配置时保持原行为。
@@ -408,3 +408,15 @@ CODEAGENT_MODEL_ECONOMY_WORKER成对启用Worker阈值降级，默认不配置�
 
 金额和角色测试使用固定Provider，无新付费模型调用，不宣称已证明真实成本节省或质量不降。
 下一项仍需完整模型能力/通用任务特征适配，以及真实模型质量与成本评测；硬预算另行设计。
+
+
+### R1三期第一部分：显式模型能力与上下文适配（2026-10-03）
+
+独立 Ubuntu VM **685 passed、1 skipped**，30 个真容器用例通过；Windows **533 passed、153 skipped**，两端 Ruff/Pyright 通过。新增38项计入全量，104项专项不另加总；本期使用固定Provider，无新真实LLM质量/成本评测。
+CODEAGENT_MODEL_CAPABILITIES指定独立能力目录；精确provider:model声明窗口、输出、工具、图片和temperature。
+启用后缺当前候选条目/价格能力冲突拒绝；不兼容主模型明确失败，不兼容备用跳过，经济模型不适用保留主模型。
+仅限流/超时/暂时不可用继续显式fallback。候选保留操作者较小窗口/输出限制；不支持temperature时省略参数。
+Worker准备预算扣除输出和工具声明，进入现有ContextManager；所有角色chat经过能力门禁，但自动重分压缩chunk/长输入仍待做。
+trajectory增加capability_routes；事件故障不改变能力决策，未启用目录兼容旧行为。
+模型能力是显式元数据和启发式检查，没有精确token保证、完整参数协商或硬预算；设计见[MODEL_CAPABILITIES.md](MODEL_CAPABILITIES.md)。
+R1二期已提交dbae3a7，本期能力适配已验收并随本次提交归档；下一项可继续压缩Map/Reduce窗口与chunk适配。

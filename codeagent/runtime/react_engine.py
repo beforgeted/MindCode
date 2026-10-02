@@ -32,6 +32,7 @@ from codeagent.infra.text import extract_test_counts
 from codeagent.infra.trace import trace_scope
 from codeagent.llm.client import LlmClient
 from codeagent.llm.message import Message, TextBlock, ToolResultBlock
+from codeagent.llm.routing import RoutingLlmClient
 from codeagent.tool.execution_manager import ExecutionScope, ToolExecutionManager
 from codeagent.tool.models import ToolCall, ToolResult, ToolResultStatus, ToolRun
 from codeagent.tool.registry import ToolRegistry
@@ -83,9 +84,12 @@ class ReActEngine:
             self._metrics.incr(M.REACT_ITERATIONS)
 
             mprofile = run.definition.memory_profile
+            profile = run.profile
+            if isinstance(self._llm, RoutingLlmClient):
+                profile = self._llm.context_profile(run.definition.model_config, profile, specs)
             prepared = await self._context.prepare(
                 run.history,
-                run.profile,
+                profile,
                 memory_type_filter=mprofile.readable_types or None,
                 memory_injection_cap=mprofile.max_injection_tokens,
             )

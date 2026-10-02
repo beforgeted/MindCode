@@ -79,9 +79,10 @@ class AnthropicLlmClient:
         kwargs: dict[str, Any] = {
             "model": model_config.model,
             "max_tokens": model_config.max_output_tokens,
-            "temperature": model_config.temperature,
             "messages": api_messages,
         }
+        if model_config.temperature is not None:
+            kwargs["temperature"] = model_config.temperature
         if system:
             kwargs["system"] = system
         if tools:
