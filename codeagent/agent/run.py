@@ -22,6 +22,7 @@ from codeagent.infra.ids import new_agent_run_id
 from codeagent.llm.message import Message
 from codeagent.tool.deferred import DeferredAction
 from codeagent.tool.models import ToolRun
+from codeagent.tool.sandbox import SandboxTools
 from codeagent.workspace.context import WorkspaceContext
 
 
@@ -65,6 +66,7 @@ class AgentRun:
     # 推测期被拦下的外部副作用（供 promote 后处理）。run_command 经 scope 往这里追加。
     deferred_actions: list[DeferredAction] = field(default_factory=list)
     _event_store: RawEventStore | None = None
+    sandbox: SandboxTools | None = None
 
     def __post_init__(self) -> None:
         self.history = ConversationHistory(

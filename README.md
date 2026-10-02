@@ -7,6 +7,10 @@ Python 实现的编码 Agent。设计文档见仓库根目录的四份 md，落�
 + 工具执行安全 + Attempt 级幂等崩溃恢复 + 小规模质量 benchmark）。
 收尾接线 **A1 / A3 / C7 / A2** 已实现：会话计量、交互审批、Worker 记忆候选抽取与延后外部动作恢复。
 优化 **O1** 已实现：角色/模型调用归因、Attempt 状态历史与任务轨迹 JSON 导出。
+优化 **R1 第一期** 已实现：角色模型配置、Provider 注册与受控 fallback（金额预算路由待做）。
+**B4/B5 沙箱第一期**已接入 `/task` Worker 与独立验收：Linux rootless Podman、无宿主目录挂载、
+离线执行与受校验快照回传。独立 Ubuntu VM 追加验收 **415 passed、1 skipped**，8 个真容器用例通过；
+详见 [`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
 
 ## 快速开始
 
@@ -104,6 +108,43 @@ pyright             # 类型
 | C7：默认抽取 Worker 记忆候选，仅成功 Attempt 集中暂存 | `orchestration/worker_harvester.py`、`orchestration/master_session.py` |
 | A2：审批后的外部动作执行、持久化与恢复 | `orchestration/run_store.py`、`orchestration/master_runtime.py` |
 | O1：调用归因、状态时间线、可重建轨迹导出 | `llm/observed_client.py`、`infra/trace.py`、`observability.py` |
+| R1：角色模型路由、显式备用模型链与错误分类 | `llm/routing.py`、`llm/client.py`、`config.py` |
+| B4/B5 第一期：Podman Worker、文件工具、命令和独立验收接线 | `execution/`、`runtime/worker_sandbox.py`、`tool/sandbox.py` |
+
+## 角色模型与备用链（R1 第一期）
+
+不配置时保持原行为：使用 `CODEAGENT_MODEL`，压缩 Map 仍使用现有 `map_model`，无自动 fallback。
+可为以下角色分别设置模型名称（后缀大写）：
+
+`PLANNER`、`WORKER`、`LOCAL_VERIFIER`、`GLOBAL_VERIFIER`、`JUDGE`、`COMPACT_MAP`、`COMPACT_REDUCE`。
+
+例如在 PowerShell 中设置（将占位模型名替换为服务支持的实际名称）：
+
+```powershell
+$env:CODEAGENT_MODEL_PLANNER = "planner-model"
+$env:CODEAGENT_MODEL_WORKER = "worker-model"
+$env:CODEAGENT_MODEL_FALLBACK_PLANNER = "backup-model-a;backup-model-b"
+```
+
+- `CODEAGENT_MODEL_<ROLE>` 覆盖该角色的模型名称，保留调用方的温度、输出上限、上下文窗口等参数。
+  未配置的角色保留传入的 `ModelConfig`；压缩 Map/Reduce 的单次输出预算仍有效。
+- `CODEAGENT_MODEL_FALLBACK` 是所有已识别角色的默认备用链；
+  `CODEAGENT_MODEL_FALLBACK_<ROLE>` 覆盖它。角色备用链显式设为空字符串可禁用全局备用链
+  （编程配置可使用 `fallbacks={"global_verifier": ()}`）。最多 3 个备用名称，规范化后去重。
+- 仅结构化的限流、超时、服务暂时不可用错误触发切换。鉴权、无效参数/模型、上下文超限、未知错误、
+  代码异常与取消不触发切换。主模型成功返回后不会因内容质量或工具执行失败重放本次 LLM 调用。
+- 切换仅对本次调用有效，不永久更改角色模型。各候选沿用相同消息与工具 schema；必须确保配置模型
+  都支持相应功能，并将上下文窗口设为这些模型共同支持的范围。暂不自动探测模型能力或调整上下文。
+- 模型名支持 `provider:model`。默认注册 `anthropic`；无前缀时使用默认 Provider。
+  CLI 不自动创建其它 SDK 客户端，未知 Provider 在调用前报配置错误。
+  编程接入可构造 `RoutingLlmClient({"anthropic": client_a, "other": client_b},
+  StaticModelRouter(config.models))`，再传给 `AgentSession` / `MasterSession`；客户端实现同一 `LlmClient` 协议。
+- 自定义 Provider 应抛出带 `LlmErrorKind` 的 `LlmError`；默认 `UNKNOWN` 保守地不切换。
+  Anthropic 适配器按 HTTP 状态及异常类型分类，不从异常文本猜测。SDK 内部重试仍由 SDK 控制。
+
+每次候选调用分别写入 O1 的 `llm_call`，带 `route_id`、`route_attempt`、`provider` 与错误分类；
+切换记录为 `model_fallback`，累加 `llm.fallbacks`，轨迹的 `by_model` 使用 `provider:model` 分组。
+成功调用只计一次用量，失败的未知用量仍不当作零费用。金额定价、预算驱动降级与任务特征路由留待后续。
 
 ## 任务轨迹与用量（O1）
 
@@ -150,8 +191,64 @@ Judge/治理链失败宁可不写长期 Memory，Planner/Verifier 失败退化/�
 **env 白名单过滤**不泄露密钥）、**推测执行期禁止不可回滚的外部副作用**（网络/发布/DB/部署→被拦并记为
 待处理动作）、放行阶段经 `ApprovalPolicy`（默认 fail-safe 拒绝）。
 
-**仍缺**（后续 Phase）：完整容器**沙箱**（`SandboxExecutor` 仅接口占位）与网络策略真隔离。
-在完全不受信任的环境仍需补沙箱。
+默认 `local` 后端仍在本机执行。`SandboxExecutor` 已实现，显式选择 `podman` 后使用下述隔离流程；
+2026-10-01 已在 WSL2 Linux 完成真实容器验收；Windows 模拟测试与 Linux 实测的证据分别保留。
+
+### Podman 沙箱（B4/B5 第一期）
+
+目标环境为 Linux、rootless Podman、cgroup v2，并具有 CPU/memory/pids 控制器。
+镜像需由操作者预先安装并信任，包含 `python`、`/bin/sh` 及任务需要的依赖；必须配置完整 SHA256
+镜像 ID。后端不自动拉取镜像，也不自动退回本机执行。
+
+```bash
+export CODEAGENT_EXECUTION_BACKEND=podman
+export CODEAGENT_SANDBOX_IMAGE='<已安装的完整 SHA256 镜像 ID>'
+export CODEAGENT_VERIFY_CMD='python -m pytest -q'
+python -m codeagent.cli.app --workspace /path/to/git-repo
+# 在 REPL 中使用 /task <目标>
+```
+
+每次 Worker（包括 reflection）拥有一个独立容器。`read_file` / `write_file` / `grep` 和
+`run_command` 都访问容器 `/workspace`；新自定义工具必须先适配沙箱，否则拒绝运行。
+Memory、Evidence 与 Artifact 的固定内置读取工具由控制面提供。
+
+输入来自本次隔离 Git worktree 的有界数据快照，排除 `.git`、`.codeagent`、`.env` 与 `.env.*`。
+容器没有宿主 worktree 挂载、没有网络、根文件系统只读；项目与临时数据使用限额 tmpfs。
+启动时在导入项目文件前检查实际 UID、capabilities、seccomp、网络接口和 cgroup 限额。
+默认每域 1 CPU / 512 MiB 内存 / 64 进程，workspace 256 MiB、临时目录 64 MiB、单命令
+60 秒、输出 4 MiB；Python 调用方可用 `AppConfig.sandbox_limits` 调整。
+
+Worker 与本地验证器均成功后，先冻结容器，由可信宿主辅助进程读取快照，再销毁容器。
+输出通过完整路径、文件类型和容量校验后进入私有 staging，再写入该 Worker 的隔离 worktree；
+后续沿用 candidate 集成和 CAS promote。链接、特殊文件、保护路径以及 `.gitattributes` /
+`.gitmodules` 改动会被拒绝；Git 控制面使用操作者信任的仓库配置。快照上限默认 4096 个文件与目录、
+单文件 8 MiB、总内容 64 MiB。失败、取消或清理失败的 Worker 不发布输出。
+
+确定性验收使用另一个容器，其文件改动不回传。退出码失败或沙箱异常会阻止 promote。
+当前只支持 Git worktree 下的 `/task`；单 Agent 普通交互、非 Git / local 隔离模式尚未接入。
+沙箱模式的 post-promote 外部动作记为跳过（中断动作保留 unknown），即使已审批也不会交给宿主执行。
+容器中没有 Git 元数据；联网安装依赖及发布操作不在本期支持范围内。
+
+2026-10-01 一期接线的历史 Windows 回归：**356 passed, 39 skipped**；Ruff、Pyright 通过。
+跳过项为 25 个 POSIX 快照测试、8 个 POSIX 发布测试、1 个既有 POSIX 执行器测试和 5 个真 Podman 测试。
+同日已补齐 Ubuntu WSL2 的 Podman、Python 测试依赖和固定摘要官方镜像。新增拒绝回归后，
+Linux 全量 **395 passed、1 skipped**，Ruff/Pyright 通过，6 个真容器用例全部通过；
+断网、只读根目录、资源限额、快照回传与清理实测通过，容器清单为空。
+唯一跳过是 Linux 上不适用的“不支持平台应拒绝”测试；证据、镜像身份与复现见
+[`LINUX_SANDBOX_ACCEPTANCE.md`](LINUX_SANDBOX_ACCEPTANCE.md)。
+Linux 上的验证入口如下（不会自动安装运行时或镜像）：
+
+```bash
+export MINDCODE_PODMAN_TEST_IMAGE='<已安装的完整 SHA256 镜像 ID>'
+python -m pytest -q tests/test_execution_snapshot.py tests/test_sandbox_workspace.py tests/test_podman_integration.py
+```
+
+跨进程回收已接入 `/task`：创建前记录意图，SQLite 私有账本配合内核 flock 租约，启动时只回收
+同项目账本内失去控制器租约且身份完全匹配的资源。SIGKILL 的未绑定 ID / 暂停窗口实测通过，
+活跃实例保留；删除失败或存在性未知保留记录并拒绝继续。不扫描其他容器。
+独立 Ubuntu VM（`6.8.0-142-generic`）追加全量 **415 passed、1 skipped**，Ruff / Pyright 通过，
+8 个真容器用例和独立内核探针通过，容器清单为空；与此前 WSL2 395 / 1 分开记录。
+待完成：普通交互入口、非 Git 沙箱及按需网络策略。资源账本不替代同 run 的跨进程恢复锁。
 
 ### 延后外部动作的恢复边界（A2）
 

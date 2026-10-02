@@ -13,7 +13,7 @@ from codeagent.evidence.models import AgentEvent, EventType
 from codeagent.infra.ids import new_llm_call_id
 from codeagent.infra.metrics import Metrics
 from codeagent.infra.trace import current_trace, trace_scope
-from codeagent.llm.client import LlmClient
+from codeagent.llm.client import LlmClient, LlmError
 from codeagent.llm.message import Message
 from codeagent.llm.types import LlmResponse, ModelConfig, ToolSpec
 
@@ -34,7 +34,8 @@ class RoleLlmClient:
         self, messages: Sequence[Message], *, model_config: ModelConfig,
         tools: Sequence[ToolSpec] = (),
     ) -> int | None:
-        return await self._client.count_tokens(messages, model_config=model_config, tools=tools)
+        with trace_scope(role=self._role):
+            return await self._client.count_tokens(messages, model_config=model_config, tools=tools)
 
 
 class ObservedLlmClient:
@@ -60,6 +61,7 @@ class ObservedLlmClient:
         call_id = new_llm_call_id()
         response = None
         status, error_type = "success", None
+        error_kind = None
         try:
             response = await self._client.chat(messages, model_config=model_config, tools=tools)
             return response
@@ -68,6 +70,7 @@ class ObservedLlmClient:
             raise
         except Exception as exc:
             status, error_type = "error", type(exc).__name__
+            error_kind = exc.kind if isinstance(exc, LlmError) else None
             raise
         finally:
             elapsed_ms = (time.perf_counter() - started) * 1000
@@ -91,8 +94,9 @@ class ObservedLlmClient:
                         "call_id": call_id,
                         "provider_call_id": response.llm_call_id if response else None,
                         "model": model_config.model, "role": role,
+                        "provider": trace.get("provider"),
                         "started_at": started_at, "elapsed_ms": elapsed_ms,
-                        "status": status, "error_type": error_type,
+                        "status": status, "error_type": error_type, "error_kind": error_kind,
                         "usage": asdict(response.usage) if response else None,
                     },
                 ))

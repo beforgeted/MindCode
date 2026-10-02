@@ -8,7 +8,7 @@
 
 安全说明：执行模型给出的 shell 是最大风险面。7b 起用 CommandPolicy 分类、拒明显危险命令；
 7c 起 env 过滤 + 进程树终止；external 副作用的推测期禁止/审批见 7d。完整容器沙箱（SandboxExecutor）
-尚未实现——在完全不受信任的环境仍需补沙箱。
+可通过 CODEAGENT_EXECUTION_BACKEND=podman 在 /task 中启用。
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from codeagent.llm.types import ToolSpec
 from codeagent.tool.base import BaseTool, ToolExecutionContext
 from codeagent.tool.deferred import DeferredAction
 from codeagent.tool.effects import EffectKind, RetryPolicy
+from codeagent.tool.executor import SandboxExecutor
 from codeagent.tool.models import ToolCall, ToolConcurrencyMode, ToolResult
 
 
@@ -81,7 +82,13 @@ class RunCommandTool(BaseTool):
                 return ToolResult.error(call, f"外部副作用未获批准（{decision.reason}）: {command}")
 
         try:
-            cwd = ctx.workspace.resolve(str(arguments.get("cwd") or "."))
+            relative = str(arguments.get("cwd") or ".")
+            # 沙箱只做词法映射；不解析宿主 worktree 中的链接或目录。
+            cwd = (
+                ctx.workspace.root / relative
+                if isinstance(ctx.command_executor, SandboxExecutor)
+                else ctx.workspace.resolve(relative)
+            )
         except PermissionError as exc:
             return ToolResult.error(call, str(exc))
 

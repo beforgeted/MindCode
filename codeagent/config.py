@@ -6,6 +6,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from codeagent.context.profile import ContextProfile
+from codeagent.execution.models import ExecutionLimits
+from codeagent.llm.routing import ModelRoutingConfig
 from codeagent.workspace.project_identity import resolve_project_identity
 
 
@@ -44,6 +46,16 @@ class AppConfig:
     # 交互模式（REPL）：单 Agent 会话允许外部副作用并走 InteractiveApprovalPolicy 询问用户；
     # 脚本/benchmark 默认 False（外部副作用一律拦成 DeferredAction）。
     interactive_approval: bool = False
+    models: ModelRoutingConfig = field(default_factory=ModelRoutingConfig)
+    execution_backend: str = "local"
+    sandbox_image: str | None = None
+    sandbox_limits: ExecutionLimits = field(default_factory=ExecutionLimits)
+
+    def __post_init__(self) -> None:
+        if self.execution_backend not in ("local", "podman"):
+            raise ValueError("execution_backend must be local or podman")
+        if self.execution_backend == "podman" and not self.sandbox_image:
+            raise ValueError("podman requires CODEAGENT_SANDBOX_IMAGE (installed SHA256 ID)")
 
     @property
     def state_root(self) -> Path:
@@ -86,6 +98,9 @@ class AppConfig:
             verify_command=os.environ.get("CODEAGENT_VERIFY_CMD") or None,
             command_allowlist=_env_patterns("CODEAGENT_CMD_ALLOW"),
             command_denylist=_env_patterns("CODEAGENT_CMD_DENY"),
+            models=ModelRoutingConfig.from_env(),
+            execution_backend=os.environ.get("CODEAGENT_EXECUTION_BACKEND") or "local",
+            sandbox_image=os.environ.get("CODEAGENT_SANDBOX_IMAGE") or None,
         )
 
 

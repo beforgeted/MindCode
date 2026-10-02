@@ -48,6 +48,7 @@ from codeagent.tool.models import (
 from codeagent.tool.normalizer import ToolResultNormalizer
 from codeagent.tool.registry import ToolNotFoundError, ToolRegistry
 from codeagent.tool.resource_lock import ResourceLockManager
+from codeagent.tool.sandbox import SandboxTools
 from codeagent.workspace.context import WorkspaceContext
 
 
@@ -69,6 +70,7 @@ class ExecutionScope:
     allow_external_effects: bool = False
     # 推测期被拦下的外部副作用记录到这里（run 级队列）。None=不收集。
     deferred: list[DeferredAction] | None = None
+    sandbox: SandboxTools | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +95,7 @@ class ToolExecutionManager:
         command_policy: CommandPolicy | None = None,
         command_executor: CommandExecutor | None = None,
         approval_policy: ApprovalPolicy | None = None,
+        require_sandbox: bool = False,
     ) -> None:
         self._registry = registry
         self._normalizer = normalizer
@@ -104,6 +107,7 @@ class ToolExecutionManager:
         self._command_policy = command_policy or CommandPolicy()
         self._command_executor = command_executor or LocalExecutor()
         self._approval = approval_policy or DenyExternalApprovalPolicy()
+        self._require_sandbox = require_sandbox
 
     async def execute_batch(
         self, scope: ExecutionScope, calls: Sequence[ToolCall]
@@ -238,6 +242,8 @@ class ToolExecutionManager:
 
         if scope.cancellation.cancelled:
             return ToolResult.cancelled(call)
+        if self._require_sandbox and scope.sandbox is None:
+            return ToolResult.error(call, "当前执行要求沙箱，但没有绑定执行域")
 
         ctx = ToolExecutionContext(
             agent_run_id=scope.agent_run_id,
@@ -250,7 +256,7 @@ class ToolExecutionManager:
             max_output_bytes=scope.profile.max_tool_output_bytes,
             timeout_seconds=scope.profile.tool_timeout_seconds,
             command_policy=self._command_policy,
-            command_executor=self._command_executor,
+            command_executor=scope.sandbox.executor if scope.sandbox else self._command_executor,
             allow_external_effects=scope.allow_external_effects,
             approval=self._approval,
             deferred=scope.deferred,
@@ -264,6 +270,8 @@ class ToolExecutionManager:
             async with asyncio.timeout(scope.profile.tool_timeout_seconds):
                 async with self._semaphore:
                     async with self._locks.acquire(keys):
+                        if scope.sandbox is not None:
+                            return await scope.sandbox.execute(tool, ctx, call.arguments)
                         return await tool.execute(ctx, call.arguments)
         except CancelledByUser:
             return ToolResult.cancelled(call)

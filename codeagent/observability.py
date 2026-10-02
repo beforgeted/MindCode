@@ -48,6 +48,8 @@ def _group(calls: list[dict[str, Any]], key: str) -> dict[str, Any]:
     groups: dict[str, list[dict[str, Any]]] = {}
     for call in calls:
         value = call.get(key) if key in ("model", "role") else call.get("trace", {}).get(key)
+        if key == "model" and call.get("provider"):
+            value = f"{call['provider']}:{value}"
         label = str(value) if value is not None else "unattributed"
         groups.setdefault(label, []).append(call)
     return {label: summarize_calls(items) for label, items in groups.items()}
@@ -122,6 +124,8 @@ class JsonTrajectoryExporter:
                                     if record and not observations["steps"] else {},
             "deferred_actions": deferred,
             "llm_calls": calls, "tools": tools, "worker_events": workers,
+            "model_fallbacks": [dict(e.payload) for e in selected
+                                if e.type == EventType.MODEL_FALLBACK],
             "totals": summarize_calls(calls),
             "by_model": _group(calls, "model"), "by_role": _group(calls, "role"),
             "by_attempt": _group(calls, "attempt_no"), "by_step": _group(calls, "step_id"),

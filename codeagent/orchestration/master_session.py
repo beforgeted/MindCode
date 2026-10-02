@@ -13,6 +13,7 @@ ReActEngine 本就是 run-agnostic（run_turn 接任意 AgentRun），所以多�
 
 from __future__ import annotations
 
+import hashlib
 from types import TracebackType
 
 from codeagent.agent.models import AgentDefinition
@@ -20,9 +21,12 @@ from codeagent.agent.registry import AgentRegistry
 from codeagent.config import AppConfig
 from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.evidence.event_store import RawEventStore
+from codeagent.execution.models import SandboxUnavailable
+from codeagent.execution.podman import PodmanSandboxManager
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
-from codeagent.llm.observed_client import ObservedLlmClient, RoleLlmClient
+from codeagent.llm.observed_client import RoleLlmClient
+from codeagent.llm.routing import attach_routing
 from codeagent.llm.types import ModelConfig
 from codeagent.memory.governance_repository import MemoryGovernanceRepository
 from codeagent.observability import JsonTrajectoryExporter
@@ -48,6 +52,7 @@ from codeagent.runtime.local_verifier import LlmLocalVerifier, LocalVerifier, St
 from codeagent.runtime.react_engine import ReActEngine
 from codeagent.session import AgentSession
 from codeagent.tool.approval import DenyExternalApprovalPolicy, InteractiveApprovalPolicy
+from codeagent.workspace.git_worktree import GitWorktreeWorkspaceManager
 from codeagent.workspace.manager import build_workspace_manager
 
 
@@ -68,73 +73,94 @@ async def build_master(
     artifact_store: ArtifactStore | None = None,
 ) -> MasterRuntime:
     """装配 MasterRuntime。stub LLM 下 Verifier 用确定性实现，真实模型下用 LLM 实现。"""
-    llm_client = ObservedLlmClient(llm_client, metrics=metrics, events=event_store, session_id="")
-    if run_store is None:
-        run_store = SqliteRunStore(config.state_root / "runs.db")
-        await run_store.start()
-    model_config = ModelConfig(
-        model=config.model, context_window=config.profile.context_window
+    llm_client = attach_routing(
+        llm_client, config.models, metrics=metrics, events=event_store, session_id="",
     )
-    wsm = await build_workspace_manager(config.workspace_root, isolation=isolation)
-    registry = AgentRegistry(default=definition)
-    stub = config.use_stub_llm
-    lverif = local_verifier or (
-        StatusLocalVerifier() if stub else LlmLocalVerifier(
-            RoleLlmClient(llm_client, "local_verifier"), model_config,
+    sandbox = None
+    if config.execution_backend == "podman":
+        assert config.sandbox_image is not None
+        sandbox = PodmanSandboxManager(
+            config.sandbox_image, limits=config.sandbox_limits,
+            ledger_directory=config.state_root / "sandbox" /
+            hashlib.sha256(config.effective_project_id.encode()).hexdigest()[:24],
+            project_id=config.effective_project_id,
         )
-    )
-    gverif = global_verifier or (
-        NoFailureVerifier() if stub else LlmGlobalVerifier(
-            RoleLlmClient(llm_client, "global_verifier"), model_config,
+        await sandbox.ensure_available()
+    try:
+        wsm = await build_workspace_manager(config.workspace_root, isolation=isolation)
+        if sandbox is not None and not isinstance(wsm, GitWorktreeWorkspaceManager):
+            raise SandboxUnavailable("Podman /task requires Git worktree isolation")
+        if run_store is None:
+            run_store = SqliteRunStore(config.state_root / "runs.db")
+            await run_store.start()
+        model_config = ModelConfig(
+            model=config.model, context_window=config.profile.context_window
         )
-    )
-    runtime = AgentRuntime(
-        react_engine=engine,
-        workspace_manager=wsm,
-        local_verifier=lverif,
-        event_store=event_store,
-        metrics=metrics,
-        candidate_harvester=(
-            EventWorkerHarvester(event_store, config.effective_project_id)
+        registry = AgentRegistry(default=definition)
+        stub = config.use_stub_llm
+        lverif = local_verifier or (
+            StatusLocalVerifier() if stub else LlmLocalVerifier(
+                RoleLlmClient(llm_client, "local_verifier"), model_config,
+            )
+        )
+        gverif = global_verifier or (
+            NoFailureVerifier() if stub else LlmGlobalVerifier(
+                RoleLlmClient(llm_client, "global_verifier"), model_config,
+            )
+        )
+        runtime = AgentRuntime(
+            react_engine=engine,
+            workspace_manager=wsm,
+            local_verifier=lverif,
+            event_store=event_store,
+            metrics=metrics,
+            sandbox_manager=sandbox,
+            candidate_harvester=(
+                EventWorkerHarvester(event_store, config.effective_project_id)
+                if memory_store is not None
+                else None
+            ),
+        )
+        scheduler = StepScheduler(
+            agent_runtime=runtime,
+            agent_registry=registry,
+            max_concurrency=config.profile.agent_max_concurrency,
+            isolated=wsm.isolated,
+            integration_coordinator=IntegrationCoordinator(wsm, metrics=metrics),
+            max_reruns=config.profile.agent_max_reruns,
+            integrator=InstructionIntegrator(),
+            max_integrations=config.profile.agent_max_integrations,
+            metrics=metrics,
+        )
+        memory_writer: SupervisorWriter = (
+            SupervisorMemoryWriter(memory_store, metrics=metrics)
             if memory_store is not None
-            else None
-        ),
-    )
-    scheduler = StepScheduler(
-        agent_runtime=runtime,
-        agent_registry=registry,
-        max_concurrency=config.profile.agent_max_concurrency,
-        isolated=wsm.isolated,
-        integration_coordinator=IntegrationCoordinator(wsm, metrics=metrics),
-        max_reruns=config.profile.agent_max_reruns,
-        integrator=InstructionIntegrator(),
-        max_integrations=config.profile.agent_max_integrations,
-        metrics=metrics,
-    )
-    memory_writer: SupervisorWriter = (
-        SupervisorMemoryWriter(memory_store, metrics=metrics)
-        if memory_store is not None
-        else NullSupervisorMemoryWriter()
-    )
-    return MasterRuntime(
-        planner=planner or LlmPlanner(RoleLlmClient(llm_client, "planner"), model_config),
-        scheduler=scheduler,
-        global_verifier=gverif,
-        workspace_manager=wsm,
-        max_replans=config.profile.master_max_replans,
-        promote_max_retries=config.profile.promote_max_retries,
-        verify_command=config.verify_command,
-        memory_writer=memory_writer,
-        run_store=run_store,
-        metrics=metrics,
-        approval_policy=(
-            InteractiveApprovalPolicy()
-            if config.interactive_approval
-            else DenyExternalApprovalPolicy()
-        ),
-        artifact_store=artifact_store,
-        trajectory_exporter=JsonTrajectoryExporter(config.state_root, run_store, event_store),
-    )
+            else NullSupervisorMemoryWriter()
+        )
+        return MasterRuntime(
+            planner=planner or LlmPlanner(RoleLlmClient(llm_client, "planner"), model_config),
+            scheduler=scheduler,
+            global_verifier=gverif,
+            workspace_manager=wsm,
+            max_replans=config.profile.master_max_replans,
+            promote_max_retries=config.profile.promote_max_retries,
+            verify_command=config.verify_command,
+            sandbox_manager=sandbox,
+            memory_writer=memory_writer,
+            run_store=run_store,
+            metrics=metrics,
+            approval_policy=(
+                InteractiveApprovalPolicy()
+                if config.interactive_approval and sandbox is None
+                else DenyExternalApprovalPolicy()
+            ),
+            artifact_store=artifact_store,
+            trajectory_exporter=JsonTrajectoryExporter(config.state_root, run_store, event_store),
+        )
+    except BaseException:
+        if sandbox is not None:
+            await sandbox.aclose()
+        raise
 
 
 class MasterSession:
@@ -161,19 +187,23 @@ class MasterSession:
 
     async def __aenter__(self) -> MasterSession:
         await self.session.__aenter__()
-        self.master = await build_master(
-            config=self._config,
-            llm_client=self._llm,
-            engine=self.session.engine,
-            event_store=self.session.event_store,
-            metrics=self.session.metrics,
-            definition=self.session.definition,
-            isolation=self._isolation,
-            planner=self._planner,
-            local_verifier=self._local_verifier,
-            global_verifier=self._global_verifier,
-            artifact_store=self.session.artifact_store,
-        )
+        try:
+            self.master = await build_master(
+                config=self._config,
+                llm_client=self._llm,
+                engine=self.session.engine,
+                event_store=self.session.event_store,
+                metrics=self.session.metrics,
+                definition=self.session.definition,
+                isolation=self._isolation,
+                planner=self._planner,
+                local_verifier=self._local_verifier,
+                global_verifier=self._global_verifier,
+                artifact_store=self.session.artifact_store,
+            )
+        except BaseException as exc:
+            await self.session.__aexit__(type(exc), exc, exc.__traceback__)
+            raise
         return self
 
     async def run_task(self, task: str) -> FinalResult:
@@ -186,4 +216,8 @@ class MasterSession:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        await self.session.__aexit__(exc_type, exc, tb)
+        try:
+            if self.master is not None:
+                await self.master.aclose()
+        finally:
+            await self.session.__aexit__(exc_type, exc, tb)

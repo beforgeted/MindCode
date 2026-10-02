@@ -2,7 +2,7 @@
 
 工具只负责"分类 + 守卫 + 组装结果"；真正 spawn/流式/杀进程的机制在这里，可替换：
 - LocalExecutor：本机执行，边读边落 artifact，加固（进程树终止 / env 过滤 / 输出上限）。
-- SandboxExecutor：容器/命名空间隔离（本期只留接口占位，未实现）。
+- SandboxExecutor：绑定当前 Worker 的 Podman 执行域，不运行宿主 shell。
 - ValidationExecutor 语义已由 git_worktree.run_check 承担（在冻结 candidate 上跑验收）。
 
 加固要点：
@@ -28,6 +28,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.evidence.models import ArtifactRef
+from codeagent.execution.models import ProcessOutput, SandboxHandle
+from codeagent.execution.podman import PodmanSandboxManager
 from codeagent.infra.cancellation import CancellationToken, CancelledByUser
 from codeagent.infra.text import TRUNCATION_MARKER
 
@@ -144,10 +146,43 @@ class LocalExecutor:
 
 
 class SandboxExecutor:
-    """容器/命名空间隔离执行 —— 接口占位，本期未实现。"""
+    """One run's executor. The host path is only a lexical cwd mapping."""
 
-    async def run(self, **_: object) -> CommandResult:
-        raise NotImplementedError("SandboxExecutor 尚未实现（Phase 7 只留接口）")
+    def __init__(self, manager: PodmanSandboxManager, handle: SandboxHandle, root: Path):
+        self.manager, self.handle, self.root = manager, handle, root
+
+    async def run(
+        self, *, command: str, cwd: Path, cancellation: CancellationToken,
+        artifact_store: ArtifactStore, max_output_bytes: int,
+        env: Mapping[str, str] | None = None, metadata: dict[str, str] | None = None,
+    ) -> CommandResult:
+        if env is not None:
+            raise ValueError("sandbox does not accept host environment overrides")
+        relative = cwd.relative_to(self.root).as_posix()
+        output = await self.manager.execute(
+            self.handle, command, cwd=relative, cancellation=cancellation,
+            max_output_bytes=max_output_bytes,
+        )
+        return await sandbox_result(output, artifact_store, metadata=metadata)
+
+
+async def sandbox_result(
+    output: ProcessOutput, artifacts: ArtifactStore, *, metadata: dict[str, str] | None = None,
+) -> CommandResult:
+    """Podman already bounds the combined byte stream before returning it."""
+    data = output.stdout + output.stderr
+    async with artifacts.open_writer("tool-results", metadata=metadata) as writer:
+        await writer.write(data)
+        ref = writer.ref
+    truncated = len(data) > _PREVIEW_BYTES
+    preview = data
+    if truncated:
+        half = _PREVIEW_BYTES // 2
+        preview = data[:half] + TRUNCATION_MARKER.encode() + data[-half:]
+    return CommandResult(
+        output.returncode, preview.decode("utf-8", errors="replace"), ref,
+        len(data), False, truncated,
+    )
 
 
 def _new_group_kwargs() -> dict[str, Any]:
@@ -194,4 +229,3 @@ def _preview(head: bytes, tail: bytes, total: int, capped: bool, cap: int) -> st
 
 
 __all__ = ["CommandExecutor", "CommandResult", "LocalExecutor", "SandboxExecutor", "filtered_env"]
-

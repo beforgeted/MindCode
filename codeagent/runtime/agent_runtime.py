@@ -16,6 +16,7 @@ from typing import Protocol, runtime_checkable
 from codeagent.agent.models import AgentDefinition, AgentRunResult, RunStatus
 from codeagent.agent.run import AgentRun
 from codeagent.evidence.event_store import NullEventStore, RawEventStore
+from codeagent.execution.podman import PodmanSandboxManager
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.infra.ids import new_agent_run_id
 from codeagent.infra.metrics import Metrics
@@ -24,6 +25,7 @@ from codeagent.memory.governance_models import MemoryCandidate
 from codeagent.orchestration.task_graph import Step
 from codeagent.runtime.local_verifier import AlwaysPassVerifier, LocalVerifier, VerificationResult
 from codeagent.runtime.react_engine import ReActEngine
+from codeagent.runtime.worker_sandbox import WorkerSandbox
 from codeagent.workspace.context import WorkspaceContext
 from codeagent.workspace.manager import WorkspaceManager
 
@@ -60,6 +62,7 @@ class AgentRuntime:
         event_store: RawEventStore | None = None,
         candidate_harvester: WorkerCandidateHarvester | None = None,
         metrics: Metrics | None = None,
+        sandbox_manager: PodmanSandboxManager | None = None,
     ) -> None:
         self._engine = react_engine
         self._wsm = workspace_manager
@@ -67,6 +70,7 @@ class AgentRuntime:
         self._events: RawEventStore = event_store or NullEventStore()
         self._harvester = candidate_harvester
         self._metrics = metrics or Metrics()
+        self._sandbox = sandbox_manager
 
     async def run(
         self, definition: AgentDefinition, step: Step, *, session_id: str,
@@ -106,18 +110,21 @@ class AgentRuntime:
         timeout = definition.context_profile.agent_run_timeout_seconds
         try:
             async with asyncio.timeout(timeout):
-                result = await self._engine.run_turn(run, step.instruction)
-                verification = await self._verifier.verify(run, result)
-
-                while (
-                    not verification.ok
-                    and run.reflection_count < definition.max_reflection_count
-                ):
-                    run.reflection_count += 1
-                    self._metrics.incr("agent.reflection")
-                    feedback = verification.feedback or "上一次未达成目标，请修正后重试。"
-                    result = await self._engine.run_turn(run, f"[验证反馈] {feedback}")
+                async with WorkerSandbox(self._sandbox, run) as domain:
+                    result = await self._engine.run_turn(run, step.instruction)
                     verification = await self._verifier.verify(run, result)
+
+                    while (
+                        not verification.ok
+                        and run.reflection_count < definition.max_reflection_count
+                    ):
+                        run.reflection_count += 1
+                        self._metrics.incr("agent.reflection")
+                        feedback = verification.feedback or "上一次未达成目标，请修正后重试。"
+                        result = await self._engine.run_turn(run, f"[验证反馈] {feedback}")
+                        verification = await self._verifier.verify(run, result)
+                    if result.ok and verification.ok:
+                        await domain.publish()
         except TimeoutError:
             self._metrics.incr("agent.timeouts")
             run.status = RunStatus.FAILED

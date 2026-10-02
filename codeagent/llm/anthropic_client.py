@@ -25,7 +25,7 @@ from codeagent.infra.metrics import (
     LLM_OUTPUT_TOKENS,
     Metrics,
 )
-from codeagent.llm.client import LlmError
+from codeagent.llm.client import LlmError, provider_error_kind
 from codeagent.llm.message import (
     Block,
     ImageBlock,
@@ -94,7 +94,7 @@ class AnthropicLlmClient:
         try:
             resp = await self._client.messages.create(**self._filter(kwargs, self._create_params))
         except Exception as exc:
-            raise LlmError(f"anthropic 调用失败: {exc}") from exc
+            raise LlmError(f"anthropic 调用失败: {exc}", kind=provider_error_kind(exc)) from exc
         self._metrics.observe(LLM_CALL_MS, (time.perf_counter() - start) * 1000.0)
         self._metrics.incr(LLM_CALLS)
 

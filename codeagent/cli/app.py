@@ -146,9 +146,12 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
         run_store=run_store,
         artifact_store=session.artifact_store,
     )
-    final = await master.run(
-        goal, session_id=session.session_id, resume_master_run_id=resume_id
-    )
+    try:
+        final = await master.run(
+            goal, session_id=session.session_id, resume_master_run_id=resume_id
+        )
+    finally:
+        await master.aclose()
     # 只呈现任务级结果：integrated 全绿才算完成;冲突/分支属内部细节,不让用户处理。
     if final.integrated and (final.deferred_failed or final.deferred_unknown
                              or final.deferred_skipped):

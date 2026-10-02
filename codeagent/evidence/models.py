@@ -23,6 +23,7 @@ from codeagent.infra.ids import new_event_id
 
 class EventType(StrEnum):
     LLM_CALL = "llm_call"
+    MODEL_FALLBACK = "model_fallback"
     USER_MESSAGE = "user_message"
     ASSISTANT_MESSAGE = "assistant_message"
     TOOL_CALL = "tool_call"

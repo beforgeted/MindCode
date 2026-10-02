@@ -17,10 +17,12 @@ from codeagent.context.manager import ContextManager, ContextPreparationResult
 from codeagent.context.token_estimator import HeuristicTokenEstimator
 from codeagent.evidence.artifact_store import FileArtifactStore
 from codeagent.evidence.jsonl_event_store import JsonlEventStore
+from codeagent.execution.models import SandboxUnavailable
 from codeagent.infra.ids import new_session_id
 from codeagent.infra.metrics import Metrics
 from codeagent.llm.client import LlmClient
-from codeagent.llm.observed_client import ObservedLlmClient, RoleLlmClient
+from codeagent.llm.observed_client import RoleLlmClient
+from codeagent.llm.routing import ModelRole, attach_routing
 from codeagent.llm.types import ModelConfig
 from codeagent.memory.dedup import MemoryDeduplicator
 from codeagent.memory.governance_service import MemoryGovernanceService
@@ -56,8 +58,9 @@ class AgentSession:
         self.session_id = session_id or new_session_id()
         self.metrics = Metrics()
         self.event_store = JsonlEventStore(config.state_root)
-        self.llm_client = ObservedLlmClient(
-            llm_client, metrics=self.metrics, events=self.event_store, session_id=self.session_id,
+        self.llm_client = attach_routing(
+            llm_client, config.models, metrics=self.metrics,
+            events=self.event_store, session_id=self.session_id,
         )
         llm_client = self.llm_client
         self.artifact_store = FileArtifactStore(config.state_root)
@@ -115,8 +118,9 @@ class AgentSession:
             id="mindcode",
             name="MindCode",
             system_prompt=DEFAULT_SYSTEM_PROMPT,
-            model_config=ModelConfig(
-                model=config.model, context_window=config.profile.context_window
+            model_config=self.llm_client.router.resolve(
+                ModelRole.WORKER,
+                base=ModelConfig(model=config.model, context_window=config.profile.context_window),
             ),
             allowed_tools=self.registry.names(),
             context_profile=config.profile,
@@ -143,6 +147,7 @@ class AgentSession:
             ),
             artifact_store=self.artifact_store,
             max_concurrency=config.max_tool_concurrency,
+            require_sandbox=config.execution_backend == "podman",
             event_store=self.event_store,
             metrics=self.metrics,
             command_policy=CommandPolicy(
@@ -224,6 +229,8 @@ class AgentSession:
             return f"[治理失败，已跳过] {type(exc).__name__}: {exc}"
 
     async def send(self, user_input: str) -> AgentRunResult:
+        if self.config.execution_backend == "podman":
+            raise SandboxUnavailable("Podman 当前支持 /task；单 Agent 交互入口尚未接入")
         return await self.engine.run_turn(self.run, user_input)
 
     @property

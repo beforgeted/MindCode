@@ -20,6 +20,9 @@ from dataclasses import dataclass, replace
 from codeagent.agent.models import FileState
 from codeagent.evidence.artifact_store import ArtifactStore
 from codeagent.evidence.models import EvidenceRef
+from codeagent.execution.models import ExecutionPurpose
+from codeagent.execution.podman import PodmanSandboxManager
+from codeagent.execution.workspace import capture_workspace
 from codeagent.infra.cancellation import CancellationToken, CancelledByUser
 from codeagent.infra.ids import new_id
 from codeagent.infra.metrics import Metrics
@@ -94,6 +97,7 @@ class MasterRuntime:
         artifact_store: ArtifactStore | None = None,
         trajectory_exporter: TrajectoryExporter | None = None,
         trajectory_timeout_seconds: float = 10.0,
+        sandbox_manager: PodmanSandboxManager | None = None,
     ) -> None:
         self._planner = planner
         self._scheduler = scheduler
@@ -112,6 +116,7 @@ class MasterRuntime:
         self._artifacts = artifact_store
         self._trajectory_exporter = trajectory_exporter
         self._trajectory_timeout = trajectory_timeout_seconds
+        self._sandbox = sandbox_manager
 
     async def run(
         self, task: str, *, session_id: str, cancellation=None,
@@ -137,6 +142,10 @@ class MasterRuntime:
                         self._metrics.incr("observability.export_failures")
                         error = type(exc).__name__
         return replace(final, trajectory_path=path, trajectory_error=error)
+
+    async def aclose(self) -> None:
+        if self._sandbox is not None:
+            await self._sandbox.aclose()
 
     async def _run(
         self,
@@ -226,7 +235,8 @@ class MasterRuntime:
             verdict = await self._verifier.verify(current_task, graph, result, target)
 
             steps_ok = not result.failed and not result.blocked
-            accept = verdict.accept and not verdict.indeterminate and steps_ok
+            deterministic_ok = target is None or target.deterministic_ok is not False
+            accept = verdict.accept and not verdict.indeterminate and steps_ok and deterministic_ok
 
             if accept:
                 if candidate is not None:
@@ -352,8 +362,8 @@ class MasterRuntime:
                 continue
             if cancellation is not None:
                 cancellation.raise_if_cancelled()
-            approved = await self._approval.approve(
-                _decision_of(action), command=action.command
+            approved = self._sandbox is None and await self._approval.approve(
+                _decision_of(action), command=action.command,
             )
             if not approved or self._artifacts is None or repo_root is None:
                 # 已开始的动作拒绝重试时，原执行结果仍然未知。
@@ -487,10 +497,28 @@ class MasterRuntime:
         if self._verify_command:
             val = await git.create_validation(candidate_sha)
             try:
-                code, out = await git.run_check(val.root, self._verify_command)
+                if self._sandbox is None:
+                    code, out = await git.run_check(val.root, self._verify_command)
+                else:
+                    handle = await self._sandbox.open(
+                        capture_workspace(val, self._sandbox.snapshot_limits),
+                        ExecutionPurpose.VALIDATION,
+                    )
+                    try:
+                        output = await self._sandbox.execute(handle, self._verify_command)
+                        code = output.returncode
+                        out = (output.stdout + output.stderr).decode("utf-8", errors="replace")
+                    finally:
+                        # Validation changes are never published to the candidate.
+                        await asyncio.shield(self._sandbox.close(handle))
                 det_ok = code == 0
                 if not det_ok:
                     det_detail = out[-2000:]
+            except Exception as exc:
+                if self._sandbox is None:
+                    raise
+                det_ok = False
+                det_detail = f"沙箱验收失败: {type(exc).__name__}: {exc}"
             finally:
                 await git.cleanup(val, keep=False)
         return VerificationTarget(
