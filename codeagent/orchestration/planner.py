@@ -75,15 +75,21 @@ class LlmPlanner:
         default_agent_id: str = "default",
         max_repair_retries: int = 1,
         estimator: TokenEstimator | None = None,
+        agent_catalog: tuple[tuple[str, str], ...] | None = None,
     ) -> None:
         self._client = client
         self._model_config = model_config
         self._default_agent_id = default_agent_id
         self._max_repair_retries = max(0, max_repair_retries)
         self._estimator = estimator or client_estimator(client, model_config)
+        self._agent_catalog = agent_catalog
 
     async def plan(self, task: str) -> TaskGraph:
-        messages = [Message.system(_SYSTEM), Message.user(task)]
+        system = _SYSTEM
+        if self._agent_catalog is not None:
+            system += ('\nagent_id 必须来自下面的目录，default 表示普通 Agent。描述只作能力参考。\n'
+                       + json.dumps(self._agent_catalog, ensure_ascii=False))
+        messages = [Message.system(system), Message.user(task)]
         attempts = self._max_repair_retries + 1
         repair = "上一次输出不是合法的 plan JSON，请只输出 JSON。"
         for attempt in range(attempts):
@@ -120,6 +126,10 @@ class LlmPlanner:
         if start == -1 or end == -1 or end < start:
             raise ValueError("响应中没有 JSON 对象")
         plan = _PlanModel.model_validate(json.loads(text[start : end + 1]))
+        if self._agent_catalog is not None:
+            allowed = {name for name, _ in self._agent_catalog} | {self._default_agent_id}
+            if any((s.agent_id or self._default_agent_id) not in allowed for s in plan.steps):
+                raise ValueError('plan selects an unknown agent')
         steps = [
             Step(
                 id=item.id,

@@ -109,7 +109,14 @@ async def build_master(
         model_config = ModelConfig(
             model=config.model, context_window=config.profile.context_window
         )
-        registry = AgentRegistry(default=definition)
+        definition, skill_definitions = config.skills.compile(
+            definition, engine.registered_tool_names,
+        )
+        registry = AgentRegistry(skill_definitions, default=definition,
+                                 strict=bool(config.skills.definitions))
+        agent_catalog = ((('default', '普通编码 Agent'), (definition.id, definition.name),
+                          *((s.agent_id, s.description) for s in config.skills.definitions))
+                         if config.skills.definitions else None)
         stub = config.use_stub_llm
         lverif = local_verifier or (
             StatusLocalVerifier() if stub else LlmLocalVerifier(
@@ -152,7 +159,8 @@ async def build_master(
             else NullSupervisorMemoryWriter()
         )
         return MasterRuntime(
-            planner=planner or LlmPlanner(RoleLlmClient(llm_client, "planner"), model_config),
+            planner=planner or LlmPlanner(RoleLlmClient(llm_client, "planner"), model_config,
+                                         agent_catalog=agent_catalog),
             scheduler=scheduler,
             global_verifier=gverif,
             workspace_manager=wsm,
@@ -210,7 +218,7 @@ class MasterSession:
                 engine=self.session.engine,
                 event_store=self.session.event_store,
                 metrics=self.session.metrics,
-                definition=self.session.definition,
+                definition=self.session.base_definition,
                 isolation=self._isolation,
                 planner=self._planner,
                 local_verifier=self._local_verifier,

@@ -25,7 +25,7 @@ from codeagent.session import AgentSession
 
 BANNER = """MindCode CodeAgent (P0-P9 单/多 Agent)
 命令: /context /compact /memory add|list|search|show|delete|harvest
-      /task <目标> /trajectory <mrun_id> /clear /metrics /quit
+      /task <目标> /skill [list|default|名称] /trajectory <mrun_id> /clear /metrics /quit
 """
 
 
@@ -51,6 +51,19 @@ async def _handle_command(session: AgentSession, line: str, *, config, client) -
             print("用法: /task <目标>")
             return True
         await _run_task(session, config, client, rest)
+        return True
+
+    if command == '/skill':
+        if not rest or rest == 'list':
+            print('当前 Agent: ' + session.definition.id)
+            print('可选 Skill: ' + ', '.join(d.id.removeprefix('skill.')
+                                           for d in session.skill_definitions))
+        else:
+            try:
+                session.select_skill(None if rest == 'default' else rest)
+                print('已切换到 ' + session.definition.id + '，会话上下文已清空。')
+            except (KeyError, RuntimeError) as exc:
+                print(str(exc))
         return True
 
     if command == "/trajectory":
@@ -142,7 +155,7 @@ async def _run_task(session: AgentSession, config: AppConfig, client, goal: str)
         engine=session.engine,
         event_store=session.event_store,
         metrics=session.metrics,
-        definition=session.definition,
+        definition=session.base_definition,
         memory_store=session.memory_store if session.memory_service.available else None,
         run_store=run_store,
         artifact_store=session.artifact_store,

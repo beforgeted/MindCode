@@ -62,6 +62,8 @@ class AgentDefinition:
     max_reflection_count: int = 3
     context_profile: ContextProfile = field(default_factory=ContextProfile)
     memory_profile: MemoryProfile = field(default_factory=MemoryProfile)
+    # Legacy empty allowed_tools means all. Restricted empty means explicitly none.
+    tools_restricted: bool = False
 
 
 class FileChangeKind(StrEnum):

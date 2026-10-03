@@ -10,9 +10,10 @@ Python 实现的编码 Agent，支持上下文压缩、证据与长期记忆、�
 - **执行隔离**：Podman 模式下文件读写、搜索与命令共用容器；默认断网、无宿主目录挂载，校验并销毁容器后才接收变更。
 - **模型与费用**：七类角色独立模型配置、显式备用链、能力目录、成本记账与 Worker 软阈值路由；按模型和协议限频校准 token 估算。
 - **长期记忆**：SQLite 存储与检索，候选抽取、去重、冲突治理，显式管理和可重建的 MEMORY.md 投影。
+- **专项 Skill（功能分支）**：显式本地配置、Planner 选择与会话切换；权限交集在执行前复核，默认关闭。
 
 P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准一期已实现并合入 `main`。
-下一阶段先补齐受控真实模型质量与费用对照评测，再按数据调整压缩阈值；通用联网、完整参数协商、硬预算和后续工具/知识生态仍待推进。
+当前 `dev/skills` 从 `main` 的 `16c669b` 独立开发 Skill 一期，已提交、未合入主线。MCP 一期已提交到 `dev/mcp-tools` 的 `1b8323a`，本分支未包含它。后续推进 Knowledge 与独立真实任务评测；上下文实验保存在 `codex/context-optimization-preview`。
 
 ## 文档
 
@@ -21,6 +22,8 @@ P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准�
 | 文档 | 内容 |
 |---|---|
 | [系统架构](docs/architecture.md) | 主要模块、执行流程、存储职责和失败边界 |
+| [Skill 使用与边界](docs/skills.md) | 配置、会话切换、Planner 选择、权限交集及失败行为 |
+| [工具与能力测试](docs/testing/tools-and-skills.md) | Skill 当前验证与 MCP 分支结果的区别 |
 | [沙箱与恢复](docs/sandbox-and-recovery.md) | Podman、快照发布、受控下载、租约与崩溃恢复 |
 | [模型与上下文](docs/model-and-context.md) | 角色路由、能力目录、成本、压缩、完整证据验收和 token 校准 |
 | [最新测试总览与复现](docs/testing/README.md) | 验收版本、分环境结果、运行方式与证据口径 |
@@ -28,7 +31,9 @@ P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准�
 | [模型与上下文测试](docs/testing/model-and-context.md) | 模型路由、费用、窗口、压缩、验收与校准的统一判据 |
 | [真实模型场景与 benchmark 使用](scenarios/README.md) | 显式启用的真实模型测试入口和任务判据 |
 
-截至 **2026-10-03**，代码提交 `0335117` 的最新完整验收：
+截至 **2026-10-04**，Skill 最终候选 Windows 完整回归 **694 passed、161 skipped**，Ruff/Pyright 通过；独立 Ubuntu VM **854 passed、1 skipped**，包含 **38 个真实 Podman 用例**；两端 Ruff/Pyright 均通过，本轮付费模型调用 0。详见[工具与能力测试](docs/testing/tools-and-skills.md)。
+
+基础主线代码提交 `0335117` 的历史完整验收：
 
 | 环境 | pytest | 静态检查 |
 |---|---|---|
@@ -36,7 +41,7 @@ P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准�
 | 独立 Ubuntu VM | **816 passed、1 skipped**，含 **36 个真实 Podman 用例** | Ruff / Pyright 通过 |
 
 专项用例包含在全量中，不另加总。这些结果验证控制流、真实容器与恢复门禁；尚无新一轮真实模型质量/费用对照结论。
-Linux 测试只在独立 Ubuntu 虚拟机运行，**禁止使用 WSL Ubuntu 跑测试**。文档重组未改变生产或测试源码，未重跑全量测试。
+Linux 测试只在独立 Ubuntu 虚拟机运行，**禁止使用 WSL Ubuntu 跑测试**。当前 Skill 为新代码，已重新冻结并做独立完整验收；主线历史数字单独保留。
 
 ## 快速开始
 
@@ -66,6 +71,7 @@ Git 任务通过 CAS 推进真实 base；非 Git 沙箱任务通过快照候选�
 | 命令 | 用途 |
 |---|---|
 | `/task <目标>` | 执行 Multi-Agent 任务 |
+| `/skill list\|default\|名称` | 查看、切换专项能力或回退普通 Agent；切换新建上下文 |
 | `/task --resume <mrun_id>` | 按持久状态恢复任务 |
 | `/trajectory <mrun_id>` | 重建并查看任务轨迹 |
 | `/context`、`/compact` | 查看上下文、请求压缩 |
@@ -100,6 +106,7 @@ $env:CODEAGENT_MODEL_FALLBACK_PLANNER = "<备用模型一>;<备用模型二>"
 | 配置 | 用途 |
 |---|---|
 | `CODEAGENT_MODEL_CAPABILITIES` | 本地模型能力 JSON 路径 |
+| `CODEAGENT_SKILLS_CONFIG` | 显式本地 Skill 配置 JSON 路径；缺省关闭 |
 | `CODEAGENT_MODEL_PRICES` | 本地价格 JSON 路径，价格由操作者核对 |
 | `CODEAGENT_WORKER_COST_THRESHOLD_USD`、`CODEAGENT_MODEL_ECONOMY_WORKER` | 成对启用单 run Worker 软成本阈值路由 |
 | `CODEAGENT_TOKEN_CALIBRATION=0` | 关闭默认启用的保守校准 |

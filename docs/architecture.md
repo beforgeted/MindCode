@@ -1,6 +1,6 @@
 # MindCode 系统架构
 
-本文描述 `main` 已实现的结构；生产与测试源码基线为 `0335117`。测试结果见[最新测试总览](testing/README.md)。
+本文描述基础 `main`（`16c669b`）与 `dev/skills` 的 Skill 一期结构；新能力已提交、未合入主线。MCP 保存在独立 `dev/mcp-tools` 分支。测试结果见[最新测试总览](testing/README.md)。
 
 ## 模块与职责
 
@@ -8,6 +8,7 @@
 |---|---|---|
 | CLI / Session | 接收目标、组装配置和工具、管理会话与审批 | [cli](../codeagent/cli/)、[session.py](../codeagent/session.py) |
 | Agent / Runtime | Agent 配置、ReAct 循环、反思与局部验收 | [agent](../codeagent/agent/)、[runtime](../codeagent/runtime/) |
+| Skills | 显式加载声明式能力，编译受限 AgentDefinition，提供 Planner 目录与会话选择 | [skills](../codeagent/skills/)、[设计与用法](skills.md) |
 | Orchestration | 规划 DAG、调度、候选集成、全局验收与恢复 | [orchestration](../codeagent/orchestration/) |
 | Workspace / Execution | Git 与快照版本、容器、发布日志、下载和资源回收 | [workspace](../codeagent/workspace/)、[execution](../codeagent/execution/) |
 | LLM | Provider、角色路由、能力门禁、预算、计价与调用观测 | [llm](../codeagent/llm/) |
@@ -82,3 +83,22 @@ Git 工作区使用 worktree 与提交版本。干净根工作区可通过 CAS f
 | 费用未知却被当作零 | 同步记录调用意图、已知成本与未知项 | 软阈值不是账单硬上限，计数费用未完整计入生成费用 |
 
 机制与配置见[沙箱与恢复](sandbox-and-recovery.md)、[模型与上下文](model-and-context.md)。
+
+## Skill 的组合与权限问题
+
+Skill 是 Agent 的静态配置层，复用 AgentRegistry 和 Step.agent_id。它不创建新的调度器或恢复账本，也不共享 AgentRun 状态。工作方法描述怎么做，运行时工具交集决定可以做什么。
+
+```mermaid
+flowchart LR
+    A[操作者显式本地配置] --> B[冻结 Skill 定义]
+    B --> C[基础权限与注册工具求交集]
+    C --> D[受限 AgentDefinition]
+    D --> E[Planner 选择或会话切换]
+    E --> F[独立 AgentRun]
+    F --> G[执行前工具权限复核]
+    G --> H[既有沙箱与独立验收]
+```
+
+核心问题是空集合的含义。旧 Agent 用空 tuple 表示不限工具，若直接拿它存储 Skill 的空交集，就会把“没有获得权限”变成“允许所有工具”。一期增加显式 tools_restricted 标记，并在模型请求和真实执行两个位置应用同一集合。模型返回未声明工具仍会得到拒绝结果，不会因为它声称需要该工具就执行。
+
+另外，未知能力不能继承默认 Agent 的更大权限。默认 Planner 可修复未知名称并有明确普通 Agent 回退；绕过 Planner 的自定义或恢复图仍在调度层检查，返回失败 Worker，保持失败到发布门禁的传播。权限正确与模型效果是两种证据：当前固定 Provider 验证前者，后续独立消融才评价后者。

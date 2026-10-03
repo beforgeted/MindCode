@@ -61,6 +61,10 @@ class ReActEngine:
         with trace_scope(session_id=run.session_id, agent_run_id=run.run_id, role="worker"):
             return await self._run_turn(run, user_input)
 
+    @property
+    def registered_tool_names(self) -> tuple[str, ...]:
+        return self._registry.names()
+
     async def _run_turn(self, run: AgentRun, user_input: str) -> AgentRunResult:
         run.status = RunStatus.RUNNING
         self._events.append_nowait(
@@ -74,7 +78,9 @@ class ReActEngine:
 
         turn_id = run.history.begin_turn()
         run.history.append(Message.user(user_input, turn_id=turn_id))
-        specs = self._registry.specs(run.definition.allowed_tools or None)
+        allowed = (run.definition.allowed_tools if run.definition.tools_restricted
+                   else run.definition.allowed_tools or None)
+        specs = self._registry.specs(allowed)
         collected: list[ToolRun] = []
 
         while run.context.react_iteration < run.definition.max_react_iterations:
@@ -127,6 +133,7 @@ class ReActEngine:
                 allow_external_effects=run.allow_external_effects,
                 deferred=run.deferred_actions,
                 sandbox=run.sandbox,
+                allowed_tools=tuple(spec.name for spec in specs),
             )
             outcome = await self._tools.execute_batch(scope, calls)
             run.context.record_tool_runs(outcome.tool_runs)

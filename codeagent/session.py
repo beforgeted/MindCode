@@ -148,6 +148,13 @@ class AgentSession:
             allowed_tools=self.registry.names(),
             context_profile=config.profile,
         )
+        self.base_definition, self.skill_definitions = config.skills.compile(
+            self.definition, self.registry.names(),
+        )
+        self.definition = self.base_definition
+        if config.skills.active is not None:
+            self.definition = next(d for d in self.skill_definitions
+                                   if d.id == f'skill.{config.skills.active}')
         self.estimator = client_estimator(RoleLlmClient(llm_client, 'worker'),
                                           self.definition.model_config)
         active_compactor = compactor or ConversationHistoryCompactor(
@@ -303,6 +310,19 @@ class AgentSession:
         """
         if self._send_lock.locked():
             raise RuntimeError("执行期间不能清空会话")
+        self.run = self._new_run()
+
+    def select_skill(self, skill_id: str | None = None) -> None:
+        """Switch an idle session and start fresh history; durable events remain."""
+        if self._closed or self._send_lock.locked():
+            raise RuntimeError('会话已关闭或正在执行，无法切换 Skill')
+        definition = self.base_definition
+        if skill_id is not None:
+            definition = next((d for d in self.skill_definitions
+                               if d.id == f'skill.{skill_id}'), None)
+            if definition is None:
+                raise KeyError('未配置的 Skill')
+        self.definition = definition
         self.run = self._new_run()
 
     @property

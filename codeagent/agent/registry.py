@@ -14,11 +14,13 @@ class AgentRegistry:
         definitions: list[AgentDefinition] | tuple[AgentDefinition, ...] = (),
         *,
         default: AgentDefinition | None = None,
+        strict: bool = False,
     ) -> None:
         self._by_id: dict[str, AgentDefinition] = {}
         for definition in definitions:
             self.register(definition)
         self._default = default
+        self._strict = strict
         if default is not None and default.id not in self._by_id:
             self._by_id[default.id] = default
 
@@ -29,7 +31,8 @@ class AgentRegistry:
         definition = self._by_id.get(agent_id)
         if definition is not None:
             return definition
-        if self._default is not None:
+        if self._default is not None and (agent_id == 'default' or (
+                not self._strict and not agent_id.startswith('skill.'))):
             return self._default
         raise KeyError(f"未注册的 agent_id: {agent_id}")
 

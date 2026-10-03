@@ -72,6 +72,7 @@ class ExecutionScope:
     # 推测期被拦下的外部副作用记录到这里（run 级队列）。None=不收集。
     deferred: list[DeferredAction] | None = None
     sandbox: SandboxTools | None = None
+    allowed_tools: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +237,8 @@ class ToolExecutionManager:
 
     async def _run_guarded(self, scope: ExecutionScope, run: ToolRun) -> ToolResult:
         call = run.call
+        if scope.allowed_tools is not None and call.name not in scope.allowed_tools:
+            return ToolResult.error(call, '当前 Agent 未获准调用此工具')
         try:
             tool = self._registry.get(call.name)
         except ToolNotFoundError:

@@ -19,14 +19,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from codeagent.agent.models import AgentDefinition, AgentRunResult, RunStatus
 from codeagent.agent.registry import AgentRegistry
+from codeagent.agent.run import AgentRun
 from codeagent.infra.cancellation import CancellationToken
 from codeagent.infra.metrics import Metrics
 from codeagent.orchestration.integration_coordinator import IntegrationCoordinator
 from codeagent.orchestration.integrator import Integrator, NullIntegrator
 from codeagent.orchestration.task_graph import Step, TaskGraph
 from codeagent.runtime.agent_runtime import AgentRuntime, WorkerRun
+from codeagent.runtime.local_verifier import VerificationResult
 from codeagent.workspace.context import WorkspaceContext
 
 # 集成后回调：记录 (step_id, worker, integrated)。integrated=False 表示执行/验收/集成任一失败。
@@ -211,7 +215,19 @@ class StepScheduler:
         trace_id: str | None,
         base_ref: str | None,
     ) -> WorkerRun:
-        definition = self._registry.get(step.agent_id)
+        try:
+            definition = self._registry.get(step.agent_id)
+        except KeyError:
+            # A custom/restored plan must not silently inherit the default authority.
+            denied = AgentDefinition(step.agent_id, 'Unknown Agent', '', tools_restricted=True)
+            run = AgentRun.create(denied, session_id=session_id,
+                                  workspace=WorkspaceContext.local(Path('.')))
+            run.status = RunStatus.FAILED
+            return WorkerRun(
+                step_id=step.id, run=run, workspace=run.workspace,
+                result=AgentRunResult.failed(run.run_id, '未注册的 Agent，未启动执行域'),
+                verification=VerificationResult(ok=False, reason='unknown agent'),
+            )
         async with semaphore:
             if not self._isolated and not step.read_only:
                 async with write_lock:
