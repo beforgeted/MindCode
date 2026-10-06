@@ -128,3 +128,6 @@ CODEAGENT_EXECUTION_BACKEND=podman、CODEAGENT_SANDBOX_IMAGE为已安装的完�
 沙箱判据见[沙箱与恢复测试](../docs/testing/sandbox-and-recovery.md)。个人现场与原始报告不随仓库发布。
 历史11场景回归不是19任务benchmark或SWE-bench成绩；verify_fail还需核对Worker确实完成、
 验收拒绝、base不动与产物不存在，避免把没有发生的写入误报为隔离成功。
+# Knowledge 离线检索对照
+
+`python -m scenarios.knowledge_evaluation --root <冻结公开源码副本> --output <新私有输出目录>` 在真实 MindCode 源码执行 easy→medium→hard 六项查询，并与现有 grep 的同字面查询比较。基线直接使用现有 GrepTool，应只对不含私有内容的冻结公开源码副本执行；不要把实时私人工作目录作为基线输入。报告记录来源命中、引用完整文本校验、输出估算 Token、调用数、机器及时间，没有模型调用或模型质量结论。更多判据见[Knowledge 测试](../docs/testing/knowledge.md)。

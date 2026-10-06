@@ -13,8 +13,10 @@ Python 实现的编码 Agent，支持上下文压缩、证据与长期记忆、�
 - **专项 Skill（功能分支）**：显式本地配置、Planner 选择与会话切换；权限交集在执行前复核，默认关闭。
 - **社区生态（功能分支）**：加载标准 `SKILL.md` 包、读取冻结配套并显式授权 Python 脚本；社区 stdio MCP 的工具、固定资源和 Prompt 在现有 Podman 域调用，内容不扩大工具权限。
 
+- **Knowledge（功能分支）**：默认关闭，显式检索当前候选的路径、Python 符号与文档；来源行号和内容版本支持再次校验。
+
 P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准一期已实现并合入 `main`。
-当前 `dev/agent-ecosystem` 基于 Skill 检查点 `2416a72`，整合 MCP 一期 `1b8323a`；E1/E2 提交 `8cfa764`，Memory 提交 `ee76d67`。Fetch 的受控 HTTPS、官方服务离线提取与 robots/字节/生命周期验收随本阶段提交保存，尚未合入主线。下一项为 Knowledge 只读索引。
+当前 `dev/agent-ecosystem` 基于 Skill 检查点 `2416a72`，整合 MCP 一期 `1b8323a`；E1/E2 提交 `8cfa764`，Memory 提交 `ee76d67`，Fetch 提交 `84db854`，尚未合入主线。本轮完成 Knowledge 只读索引：主动查询路径/符号/文档、候选内容版本与引用校验；该实现保存在功能分支，默认关闭。下一阶段为固定任务下的能力效果评测，真实模型调用另行取得数据与额度授权。
 
 当前分支分工：`main` 保存已发布基础功能，`dev/agent-ecosystem` 推进 Skill/MCP 生态，`codex/context-optimization-preview` 保留上下文优化与消融实验。已合并或被整合替代的旧开发、测试分支不再维护；历史实验记录仍留在本地忽略目录。
 
@@ -33,9 +35,10 @@ P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准�
 | [最新测试总览与复现](docs/testing/README.md) | 验收版本、分环境结果、运行方式与证据口径 |
 | [沙箱与恢复测试](docs/testing/sandbox-and-recovery.md) | 隔离、下载、交互、发布、强杀与恢复的统一判据 |
 | [模型与上下文测试](docs/testing/model-and-context.md) | 模型路由、费用、窗口、压缩、验收与校准的统一判据 |
+| [Knowledge 只读索引](docs/knowledge.md) / [测试](docs/testing/knowledge.md) | 当前候选内容检索、增量解析与来源引用校验 |
 | [真实模型场景与 benchmark 使用](scenarios/README.md) | 显式启用的真实模型测试入口和任务判据 |
 
-截至 **2026-10-06**，当前生态候选 Windows 完整回归 **839 passed、211 skipped**；独立 Ubuntu VM **1049 passed、1 skipped**，包含 **84 个真实 Podman 用例**，两端 Ruff/Pyright 通过，付费模型调用 0。Fetch 专项 **43/43**，含 9 个真实容器用例。VM 的 149 个社区包完整匹配固定输入；Windows 148 个完整匹配、1 个包缺脚本，不能算该包完整验收。完整结果与边界见[工具与能力测试](docs/testing/tools-and-skills.md)。
+本轮 Knowledge 候选全量验收：Windows **883 passed、222 skipped**；独立 Ubuntu VM **1104 passed、1 skipped**，包括 **93 个真实 Podman 用例**，两端 Ruff/Pyright 通过。Knowledge 专项 **55/55**、9 个真实容器用例；冻结项目上的六项检索对照 Top-5 **6/6**、引用 **27/27** 有效。没有 WSL 或付费模型调用。Windows 148 个社区包完整匹配、1 包缺脚本，VM 149 个完整匹配；此输入边界仍保留。详情见[测试总览](docs/testing/README.md)与[Knowledge 验收](docs/testing/knowledge.md)。
 
 基础主线代码提交 `0335117` 的历史完整验收：
 

@@ -32,6 +32,7 @@ from codeagent.execution.models import ProcessOutput, SandboxHandle
 from codeagent.execution.podman import PodmanSandboxManager
 from codeagent.infra.cancellation import CancellationToken, CancelledByUser
 from codeagent.infra.text import TRUNCATION_MARKER
+from codeagent.knowledge.state import KnowledgeState
 
 _CHUNK = 64 * 1024
 _PREVIEW_BYTES = 128 * 1024
@@ -80,6 +81,9 @@ class CommandExecutor(Protocol):
 
 class LocalExecutor:
     """本机执行 + 加固。流式落 artifact，取消/超时杀整棵进程树。"""
+
+    def __init__(self) -> None:
+        self.knowledge = KnowledgeState()
 
     async def run(
         self,
@@ -150,6 +154,7 @@ class SandboxExecutor:
 
     def __init__(self, manager: PodmanSandboxManager, handle: SandboxHandle, root: Path):
         self.manager, self.handle, self.root = manager, handle, root
+        self.knowledge = KnowledgeState()
 
     async def run(
         self, *, command: str, cwd: Path, cancellation: CancellationToken,

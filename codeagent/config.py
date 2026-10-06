@@ -64,8 +64,11 @@ class AppConfig:
     downloads: DownloadPolicy = field(default_factory=DownloadPolicy)
     skills: SkillConfig = field(default_factory=SkillConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    knowledge_enabled: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.knowledge_enabled) is not bool:
+            raise ValueError('knowledge_enabled must be an explicit boolean')
         if self.execution_backend not in ("local", "podman"):
             raise ValueError("execution_backend must be local or podman")
         if self.execution_backend == "podman" and not self.sandbox_image:
@@ -95,6 +98,9 @@ class AppConfig:
         )
         project_root = home / "projects" / identity.project_id if configured_home else home
         window = _env_int("CODEAGENT_CONTEXT_WINDOW", 200_000)
+        knowledge_flag = os.environ.get('CODEAGENT_KNOWLEDGE', '0')
+        if knowledge_flag not in ('0', '1'):
+            raise ValueError('CODEAGENT_KNOWLEDGE must be 0 or 1')
         profile = replace(
             ContextProfile(),
             context_window=window,
@@ -118,6 +124,7 @@ class AppConfig:
             models=ModelRoutingConfig.from_env(),
             skills=SkillConfig.from_env(),
             mcp=McpConfig.from_env(),
+            knowledge_enabled=knowledge_flag == '1',
             costs=CostConfig.from_env(),
             capabilities=CapabilityConfig.from_env(),
             calibration=CalibrationConfig(

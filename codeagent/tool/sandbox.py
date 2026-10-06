@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from codeagent.execution.models import SandboxError
+from codeagent.knowledge.tool import KnowledgeTool
 from codeagent.skills.resource_tool import SkillResourceTool
 from codeagent.skills.script_tool import SkillScriptTool
 from codeagent.tool.base import Tool, ToolExecutionContext
@@ -37,6 +38,7 @@ class SandboxTools:
         if type(tool) in (
             RunCommandTool, ReadArtifactTool, MemoryGetTool, EvidenceGetTool, DownloadFileTool,
             McpProjectTool, McpCommunityTool, McpContextTool, SkillResourceTool, SkillScriptTool,
+            KnowledgeTool,
         ):
             return await tool.execute(ctx, arguments)
         if type(tool) not in (ReadFileTool, WriteFileTool, GrepTool):
