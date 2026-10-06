@@ -115,6 +115,8 @@ a→b→c 不误报）。`python -m scenarios.planner_probe --samples 5`。
 
 另准备固定官方 Memory npm 安装前缀时，可以传入 `--memory-node-root <Memory安装前缀>`；省略该参数仍只发现原来的四个服务。对应 `tests/test_mcp_memory.py` 和 `tests/test_mcp_memory_podman.py` 分别检查配置/状态文件边界与真实跨调用、Worker 隔离、失败回收、发布门禁。运行时镜像必须另含相同 Memory 分发包；发现不会调用写工具或打开运行授权。
 
+已显式安装固定官方 Fetch 源码与依赖时，可以增加 `--fetch`，只进行协议发现并记录来源版本，不发 HTTP 请求。配套 `tests/test_mcp_fetch.py` 与 `tests/test_mcp_fetch_podman.py` 验证域名/DNS/IP、robots、下载量、真实服务提取与分页、取消和失败回收。真实 HTTPS 用例仅在独立 VM 设置固定公开的 `MINDCODE_FETCH_LIVE_URL` 与受信 `MINDCODE_FETCH_IMAGE` 后执行；配置入口见[社区 MCP 接入](../docs/mcp-tools.md)。原始结果与失败现场保存在忽略目录。
+
 ## 沙箱运行约束
 
 项目规定Linux测试只在独立Ubuntu VM运行，禁止使用WSL Ubuntu。运行模型前应显式设置

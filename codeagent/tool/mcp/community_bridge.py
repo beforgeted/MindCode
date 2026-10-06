@@ -6,12 +6,14 @@ elicitation callbacks. The outer executor owns cancellation and process-tree cle
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import re
 import shutil
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -126,9 +128,28 @@ def check_context_result(kind: str, key: str, data: dict, limit: int) -> None:
 
 
 async def exchange(payload: dict[str, Any]) -> dict:
+    try:
+        return await _exchange(payload)
+    finally:
+        if receipt := payload.pop('_fetch_receipt', None):
+            os.unlink(receipt)
+
+
+async def _exchange(payload: dict[str, Any]) -> dict:
     from jsonschema.validators import validator_for
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
+
+    if payload['action'] == 'fetch_check':
+        if not payload.get('runtime'):
+            raise ValueError('Fetch checks require the runtime domain')
+        namespace: dict[str, Any] = {'__name__': '_offline_fetch_adapter'}
+        exec(payload['fetch_replay_source'], namespace)
+        namespace['install'](payload['fetch_records'])
+        server = importlib.import_module('mcp_server_fetch.server')
+        await server.check_may_autonomously_fetch_url(payload['fetch_url'],
+                                                    server.DEFAULT_USER_AGENT_AUTONOMOUS)
+        return {'allowed': True}
 
     if payload['action'] == 'call':
         schema = payload['descriptor']['inputSchema']
@@ -147,6 +168,15 @@ async def exchange(payload: dict[str, Any]) -> dict:
     else:
         env = dict(os.environ)
     memory_path = None
+    if 'fetch_records' in payload:
+        if not runtime or payload['action'] != 'call':
+            raise ValueError('offline Fetch requires a runtime tool call')
+        # tmpfs data only, never candidate state; the execution domain owns cleanup.
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', prefix='mcp-fetch-',
+                                         suffix='.json', delete=False) as receipt:
+            payload['_fetch_receipt'] = receipt.name
+            json.dump(payload['fetch_records'], receipt)
+        argv = [argv[0], '-I', '-c', payload['fetch_replay_source'], receipt.name]
     if 'workspace_memory' in payload:
         if not runtime:
             raise ValueError('workspace memory requires the runtime domain')
@@ -161,6 +191,9 @@ async def exchange(payload: dict[str, Any]) -> dict:
             capabilities = initialized.capabilities.model_dump(mode='json', exclude_none=True)
             catalog: dict[str, Any] = {'protocolVersion': initialized.protocolVersion,
                                        'capabilities': capabilities}
+            if payload.get('fetch_validate'):
+                server = importlib.import_module('mcp_server_fetch.server')
+                catalog['fetch_url'] = str(server.Fetch(**payload['arguments']).url)
 
             async def listing(kind: str):
                 items = []

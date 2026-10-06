@@ -13,6 +13,8 @@
 | 官方 Time / Git Python 分发包 | 均 `2026.8.18` | 真实 initialize/list/call |
 | 官方 Filesystem / Everything / Memory npm 分发包 | 均 `2026.8.31` | 真实 Schema、IO、协议与文件状态 |
 | SDK / YAML / Schema | MCP `1.30.0`、PyYAML `6.0.3`、jsonschema `4.26.0` | 固定客户端依赖；官方参考另用 strictyaml `1.7.3` |
+| 官方 Fetch 源码 | 上述 MCP 固定提交的 `src/fetch`，源码版本 `0.6.3` | 实际源码摘要匹配；不冒充同版本 PyPI wheel 构建 |
+| Fetch 内容依赖 | readabilipy `0.3.0`、markdownify `1.2.3`、Protego `0.7.0`；其它依赖与平台 wheel 另存摘要 | 明确纯 Python HTML 路径；不运行期安装 Node/npm |
 
 两个 Skill 仓库合计发现 164 个 `SKILL.md` 文件，其中 **149 个顶层/归档包、15 个嵌套文件**。149 个包全部通过当前加载器和固定官方参考验证器。模板、归档包和嵌套反例不等同于 164 项真实业务能力，也不等同于 149 个 pytest 用例。
 
@@ -30,22 +32,23 @@ Skill 回归分别逐包安装、核对完整冻结内容、重新加载，并�
 | Everything | 官方协议测试服务 | 13 工具、7 资源、4 Prompt；资源/模板发现，实际资源读与带参数 Prompt；structuredContent 通过，图片结果显式拒绝 |
 | Git | 官方 Python 服务 | 12 工具发现与实际 git_status；Podman 使用临时独立仓库，主机 `.git` 仍不进入快照 |
 | Memory | 官方 npm 服务，9 工具发现、逐项授权 | 创建实体、追加观察、读图谱；跨调用与新域恢复；同域串行不丢更新、双域状态隔离；损坏/超限/链接、响应失败后废弃、服务关闭及验收发布 |
+| Fetch | 官方固定源码 + 受控 HTTPS 与离线传输适配 | 真实工具发现、HTML 提取、raw/分页、URL 规范化；官方 robots 拒绝、未知跳转、Schema 漂移、混合 DNS、超限、超时/取消与 tmpfs 清理；官方 Python 文档真实 HTTPS |
 | 运行与发布 | 官方 Filesystem / Everything / Time | MCP 写入通过独立验收才发布；失败保持 base/HEAD；超时/取消回收；Schema 改变拒绝；工作区同名模块和启动脚本不能替换服务 |
 
 Resources/Prompts 已按精确 URI/名称授权为 Agent 工具：固定描述符、必填参数、未知参数、漂移及超限拒绝；结果保持普通 ToolResult。真实 Everything 交互反例经 Prompt 返回越权文字后，伪造写工具仍被 Skill 权限拒绝。动态模板 URI 尚未授权。客户端有目录分页保护，但本轮样本的实际分页触发情况单独记录；不能将实现支持写成已覆盖所有分页行为。sampling、elicitation、roots、tasks、订阅、远程 HTTP/OAuth、多媒体和有状态重连尚未验收或支持，不宣称完整 MCP Protocol compatibility。
 
 ## 最新完整验收
 
-当前 Memory 候选冻结 **253 文件**，全源码清单 SHA256 `b5bbda91d094e07fc8b7c3e37422a1bdaac440e4bba7608f43565d409d1e91e5`；**240 个 Python/pyproject 文件**清单 SHA256 `047ec74d4669214533bf1daa77d30a088c3f9ebcf3092e5d86b31b9738ae2542`。E1/E2 已提交 `8cfa764`，本轮提交新增状态能力，尚未合入主线。公开文档随后整理，最终代码摘要单独绑定。
+当前 Fetch 验收候选冻结 **258 文件**，全源码清单 SHA256 `a42ff2972b85525600aff70e93ac2766dbf1e0f3090c58fab5aa90365bad8ee9`；**245 个 Python/pyproject 文件**清单 SHA256 `c23d322e587c03eec57c483cbc24a3f8fcc461e64df7fd6da3e541008e8497d0`。Memory 已提交 `ee76d67`，Fetch 随本阶段提交保存，尚未合入主线。公开文档随后整理，提交前再次核对代码摘要，未重跑源码未变的测试。
 
 | 环境 | 收集 | 通过 | 跳过 | 失败 / 错误 | 静态检查 |
 |---|---:|---:|---:|---:|---|
-| Windows | 1007 | **805** | **202** | 0 / 0 | Ruff / Pyright 通过 |
-| 独立 Ubuntu VM | 1007 | **1006** | **1** | 0 / 0 | Ruff / Pyright 通过 |
+| Windows | 1050 | **839** | **211** | 0 / 0 | Ruff / Pyright 通过 |
+| 独立 Ubuntu VM | 1050 | **1049** | **1** | 0 / 0 | Ruff / Pyright 通过 |
 
-VM 生态专项 **111/111**，含 77 项加载/协议/权限/状态与 **34 个真实 Podman 用例**；全量共 **75 个真实 Podman 用例**（基础 36 + Skill 2 + 随附 MCP 3 + 社区 10 + 可执行能力 13 + Memory 11），均已包含在 1007 项中，不能相加。Windows 跳过基础 159、新增 39 项容器测试及 4 项不可用的符号链接测试；VM 仅跳过一个不适用的平台拒绝用例。
+全量中的生态相关用例 **154/154**，含 111 项加载/协议/权限/状态与 **43 个真实 Podman 用例**；全量共 **84 个真实 Podman 用例**（基础 36 + Skill 2 + 随附 MCP 3 + 社区 10 + 可执行能力 13 + Memory 11 + Fetch 9），均已包含在 1050 项中，不能相加。Fetch 另在全量前完成 **43/43** 专项；Windows 跳过基础 159、新增 48 项容器测试及 4 项不可用的符号链接测试；VM 仅跳过一个不适用的平台拒绝用例。
 
-双平台代码清单与矩阵依赖版本一致，操作系统、Python 与 Node 运行时分别记录；148 个社区包内容摘要一致，Windows 另 1 包存在下述输入缺口。Memory npm 包为 `2026.8.31`，新增依赖全文件摘要及 npm integrity 清单已核对。42 份 VM 证据逐项核对，归档含摘要清单共 43 文件，SHA256 `f056e65008e640b625fde144e1594ff0c4abb4b7de2a9b84bc10b9581db8bde0`。VM 身份已核对为独立 Ubuntu VMware 来宾，未使用 WSL。原仓库和历史记录保持不变，容器清单为空，付费模型调用 0。原始日志保存在已忽略的 `.codeagent/validation/mcp-memory/`，源码、来源与失败现场保存在本地私有验证目录。
+双平台代码清单与矩阵依赖版本一致，操作系统、Python 与 Node 运行时分别记录；148 个社区包内容摘要一致，Windows 另 1 包存在下述输入缺口。官方 Fetch 的 3 个源码文件与固定来源逐字节一致，平台 wheel 与依赖清单分别保存，不将 Windows/Linux 原生库当作相同字节。61 份 VM 证据逐项核对，归档含摘要清单共 62 文件，SHA256 `9bee785fc46decc6ba18c775fcbdd088bc1f6d357a7e918867d73ab36caa88d2`。VM 身份已核对为独立 Ubuntu VMware 来宾，未使用 WSL。原仓库和历史记录保持不变，容器清单为空，付费模型调用 0。原始日志保存在已忽略的 `.codeagent/validation/mcp-fetch/`，源码、来源与失败现场保存在本地私有验证目录。
 
 原始失败包括 SDK 将单个 ValueError 包装成 ExceptionGroup，以及私有 umask 导致打包后 Node 的目录/文件不可被容器非 root 用户读取执行。前者保留单一叶异常类别，后者以新镜像标签修复依赖权限；失败日志、首次镜像和原仓库现场保留在忽略目录，原有隔离约束没有放宽。
 
@@ -68,4 +71,8 @@ python -m pytest -q tests/test_ecosystem_podman.py tests/test_ecosystem_runtime_
 
 准备器不联网安装、修改源包或调用模型；已有输出目录拒绝覆盖。来源目录名称与固定树结构应匹配；全量复验还需基础 Podman 镜像及受控下载测试的既有可信 fixture，不能因漏配而跳过后声称 VM 全量通过。
 
-本轮验证的是社区结构、协议行为、隔离、状态归属和发布契约，没有调用付费模型，也没有做 Skill 效果消融。兼容通过不证明第三方提示词提升任务成功率。Memory 文件状态与生命周期一期已完成；下一项 Fetch 受控网络，Knowledge 顺延。没有长期进程缓存或状态语义合并。
+Fetch 增加 `--fetch` 仅发现已安装的官方服务。使用固定上游源码与 wheel 依赖构建独立受信镜像，构建本身断网；独立 VM 设置 `MINDCODE_FETCH_IMAGE` 为其完整 ID、`MINDCODE_FETCH_LIVE_URL=https://docs.python.org/3/library/urllib.parse.html`、`MINDCODE_FETCH_LIVE_EXPECTED="Parse URLs"`，执行 `tests/test_mcp_fetch.py` 与 `tests/test_mcp_fetch_podman.py`。正例正文标记与 URL 前缀不同，避免因结果重复 URL 而虚假通过。网页内容是动态输入，接收字节数、SHA256 与请求元数据逐次保存；完整正文仅服务本次调用，未持久保存，不声称内容永久相同或能够离线重现整个网页。
+
+首次 Fetch 容器夹具重复创建目录，8 个用例未进入实际调用；按记录的镜像/所有者逐项回收残留容器，保留失败日志。真实 HTML 随后暴露 readabilipy 自动尝试 npm 安装，改为显式纯 Python 路径并断言不启动 Node/npm。GitHub 直连重置未算作下载超限；PyPI 项目页挑战未算作正文获取；PyPI JSON 被官方 robots 禁止，保留为正确拒绝，未绕过规则。最终改用 robots 允许的官方 Python 文档验证 HTTPS 与页面字节上限。离线的合成 HTML/重定向/故障响应检验真实服务及拒绝路径，不冒充真实公网跳转或浏览器渲染验收。
+
+本轮验证的是社区结构、协议行为、隔离、状态归属、受控网络和发布契约，没有调用付费模型，也没有做 Skill 效果消融。兼容通过不证明第三方提示词提升任务成功率。Memory 文件状态与 Fetch 受控网络一期已完成，下一项 Knowledge 只读索引。没有长期进程缓存、状态语义合并或浏览器 JavaScript 渲染。

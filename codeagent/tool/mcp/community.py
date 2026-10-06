@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from codeagent.execution.fetch import ControlledFetcher, FetchPolicy
 from codeagent.llm.types import ToolSpec
 from codeagent.tool.base import BaseTool, ToolExecutionContext
 from codeagent.tool.effects import EffectKind, RetryPolicy
@@ -59,8 +60,18 @@ class McpServer:
     grants: tuple[McpGrant, ...]
     context_grants: tuple[McpContextGrant, ...] = ()
     workspace_memory: bool = False
+    fetch_policy: FetchPolicy | None = None
 
     def __post_init__(self) -> None:
+        if self.fetch_policy is not None:
+            if (not isinstance(self.fetch_policy, FetchPolicy) or self.workspace_memory
+                    or self.context_grants or len(self.grants) != 1
+                    or self.grants[0].name != 'fetch'
+                    or self.grants[0].effect is not EffectKind.READ_ONLY
+                    or self.grants[0].retry is not RetryPolicy.NEVER
+                    or self.container_command[1:] != ('-m', 'mcp_server_fetch')):
+                raise ValueError('controlled Fetch requires the official module, one read-only '
+                                 'fetch tool with retry=never and no prompts/state')
         if type(self.workspace_memory) is not bool:
             raise ValueError('workspace_memory must be an explicit boolean')
         if self.workspace_memory and any(g.effect is EffectKind.WORKSPACE_WRITE
@@ -97,11 +108,11 @@ async def _runtime_exchange(executor: SandboxExecutor, ctx: ToolExecutionContext
         if output.returncode:
             data.setdefault('bridge_error', 'ProtocolError')
         if output.returncode or 'bridge_error' in data or data.get('isError'):
-            if server.workspace_memory:
+            if server.workspace_memory or server.fetch_policy is not None:
                 await executor.manager.close(executor.handle)
         return data
     except BaseException:
-        if server.workspace_memory:
+        if server.workspace_memory or server.fetch_policy is not None:
             await asyncio.shield(executor.manager.close(executor.handle))
         raise
 
@@ -117,6 +128,8 @@ class McpCommunityTool(BaseTool):
         suffix = hashlib.sha256(grant.name.encode()).hexdigest()[:10]
         self._name = f'mcp_{server.id}_{stem}_{suffix}'
         self._source = Path(community_bridge.__file__).read_text(encoding='utf-8')
+        from codeagent.tool.mcp import fetch_replay
+        self._fetch_source = Path(fetch_replay.__file__).read_text(encoding='utf-8')
         self.effect_kind = grant.effect
         self.retry_policy = grant.retry
 
@@ -144,9 +157,45 @@ class McpCommunityTool(BaseTool):
             'timeout_seconds': ctx.timeout_seconds,
             'max_response_bytes': min(ctx.max_output_bytes, 1024 * 1024),
         }
+        if self.server.fetch_policy is not None:
+            policy = self.server.fetch_policy
+            payload['fetch_replay_source'] = self._fetch_source
+            try:
+                async with asyncio.timeout(min(ctx.timeout_seconds, policy.timeout_seconds)):
+                    # Validate pinned schema before granting any network access.
+                    from jsonschema.validators import validator_for
+                    validator_for(payload['descriptor']['inputSchema'])(
+                        payload['descriptor']['inputSchema']).validate(arguments)
+                    allowed = {'url', 'max_length', 'start_index', 'raw'}
+                    if set(arguments) - allowed:
+                        raise ValueError('unsupported Fetch argument')
+                    catalog = await _runtime_exchange(executor, ctx, self.server, self._source,
+                                                     {**payload, 'action': 'inspect',
+                                                      'fetch_validate': True})
+                    matches = [t for t in catalog.get('tools', []) if t['name'] == 'fetch']
+                    if (len(matches) != 1 or matches[0]['inputSchema']
+                            != payload['descriptor']['inputSchema']):
+                        raise ValueError('authorized Fetch schema changed before network access')
+                    normalized = {**arguments, 'url': catalog['fetch_url']}
+                    payload['arguments'] = normalized
+                    async def authorize(url: str, records: dict) -> None:
+                        checked = await _runtime_exchange(executor, ctx, self.server, self._source,
+                            {**payload, 'action': 'fetch_check', 'fetch_url': url,
+                             'fetch_records': records})
+                        if checked != {'allowed': True}:
+                            raise ValueError('official robots check denied Fetch')
+                    records = await ControlledFetcher(policy, ctx.artifact_store).fetch(
+                        normalized['url'], ctx.cancellation, authorize)
+                    payload['fetch_records'] = records
+                    data = await _runtime_exchange(executor, ctx, self.server,
+                                                   self._source, payload)
+            except BaseException:
+                await asyncio.shield(executor.manager.close(executor.handle))
+                raise
+        else:
+            data = await _runtime_exchange(executor, ctx, self.server, self._source, payload)
         # The controller deadline also covers synchronous schema work in the helper.
         # Cancelling the Podman operation destroys its execution domain and descendants.
-        data = await _runtime_exchange(executor, ctx, self.server, self._source, payload)
         if 'bridge_error' in data:
             if data.get('bridge_error') == 'TimeoutError':
                 raise TimeoutError('MCP request deadline')

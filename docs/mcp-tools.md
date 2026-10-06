@@ -90,6 +90,35 @@ v2 服务配置可另加 `resources` 和 `prompts` 白名单，旧配置省略�
 
 这里的 JSONL 图谱属于项目候选产物，可能随项目变更发布；MindCode 自带 SQLite `memory.db` 属于另一套长期记忆能力，不与该图谱自动同步。它们也不能代替尚待实现的项目 Knowledge 索引。没有加入长期服务缓存、后台重连、外部数据库或跨 Worker 全局可变会话。
 
+## Fetch 的受控 HTTPS 入口
+
+官方 Fetch 的 `max_length` 限制返回字符数，不能限制下载字节数；默认传输还会跟随重定向。因此仅把服务放进可联网容器会扩大所有容器代码的网络权限。当前采用独立受控请求入口：操作者授权域名，控制面获取有界响应，官方 Fetch 服务在原有断网容器内处理这些响应。MCP 仍使用 stdio，不是远程 HTTP MCP 接入。上游行为见[官方 Fetch 文档](https://github.com/modelcontextprotocol/servers/blob/f46d9578190b476b3501923ea8977d899e8db2bcb/src/fetch/README.md)。
+
+在 v2 服务配置中显式增加：
+
+```json
+{
+  "container_command": ["python3", "-m", "mcp_server_fetch"],
+  "fetch": {
+    "hosts": ["docs.python.org"],
+    "max_bytes": 1048576,
+    "max_redirects": 3,
+    "timeout_seconds": 30
+  },
+  "tools": {"fetch": {"effect": "read_only", "retry": "never"}}
+}
+```
+
+仍需服务 id、宿主发现 command、固定 catalog 及摘要，并在受信镜像中预装官方 Fetch 和依赖。仅允许一个 `fetch` 工具，不同时开启 Memory、Resources 或 Prompts。官方 Fetch Prompt 会跳过 robots 检查，因此没有将该入口开放给模型。未配置 `fetch` 时，不会为社区服务开放网络；模型也不能增加域名、改限额或开启功能。
+
+请求过程先在容器内复核实际 Schema、解析参数并取得官方规范化 URL，再由控制面验证 HTTPS:443 与域名白名单。禁止 IP 字面量、认证信息、查询参数和 fragment；每跳重新检查 DNS 全部记录，只接受公网地址，并将连接固定到已验证 IP，TLS 仍验证原域名。网络子进程仅发送固定 User-Agent、Host 和 `Accept-Encoding: identity`，不转发 Cookie、Authorization、代理或服务环境中的凭据。
+
+每个页面跳转目标都先获取受控的 robots.txt，并在当前容器使用官方 Protego 检查，再发页面请求；robots 自身的重定向也受同一域名/DNS/IP 限制。401、403、5xx、解析失败或网络异常不能获得页面访问许可。页面与 robots 各自最多 3 次重定向；正文按流读取，每个页面响应最多 1MiB，robots 最多 `min(max_bytes, 64KiB)`。这不是“整个调用只下载 1MiB”的总流量承诺。压缩响应、无效长度与不完整正文显式失败；总时限覆盖发现、网络、解析和 MCP 调用。
+
+官方服务的 HTTP 客户端在独立进程中适配为只读取本次授权响应的离线传输，没有实时网络回退。官方参数、robots 解析、文本分页和 Markdown 转换仍由固定上游源码处理。HTML 依赖 `readabilipy` 检测到 Node 但缺 JS 依赖时会尝试安装；适配层显式选择其已有纯 Python 路径，禁止运行期 Node/npm 安装，提取结果可能与 Readability.js 不同。响应文件只在容器 tmpfs 临时保存，服务关闭后删除，不加入候选快照。
+
+每次 DNS/连接之前保存请求意图，结束记录目标、IP、状态、字节数与内容 SHA256；审计存储不可用时不发请求。摘要是本次接收内容的证据，不是下载前固定内容的供应链证明。错误、超时、取消或响应异常会废弃当前候选域；网络上已经发生的 GET 无法回滚。因此显式要求 `retry=never`，沿用整 Worker 自动重放门禁，但不宣称 exactly-once 或网页内容可重现。返回内容仍是普通、不受信任的 ToolResult。
+
 ## 调用与隔离链路
 
 ```mermaid
@@ -121,7 +150,7 @@ effect 是操作者对调度/重试的分类，`read_only` 不会使 `/workspace
 
 | 能力 | 当前范围 |
 |---|---|
-| stdio initialize / tools/list / tools/call | 五个真实官方服务，实际参数校验、文本和 structuredContent |
+| stdio initialize / tools/list / tools/call | Time、Filesystem、Everything、Git、Memory，以及受控 Fetch；实际参数校验、文本和 structuredContent |
 | 分页目录 | 客户端支持最多 16 页、256 项，循环 cursor 拒绝；是否在真实样本中触发分页单独记录 |
 | Resources / Prompts | 操作者精确白名单、目录固定、Podman 内运行；文本以普通 ToolResult 返回；Everything 真实读/取 |
 | resourceTemplates | 操作者发现；尚未提供模板参数展开或动态 URI 授权 |
@@ -130,6 +159,7 @@ effect 是操作者对调度/重试的分类，`read_only` 不会使 `/workspace
 | 远程 HTTP、OAuth、外部数据库或发布 | 未支持；没有凭据环境变量传递入口 |
 | 文件持久化状态 | 显式开启 workspace_memory；候选 JSONL、域内串行、Worker 隔离与验收发布门禁 |
 | 长期进程状态 | 每次调用独立会话；没有长期进程缓存或服务重连重放 |
+| Fetch 网络读取 | 显式域名白名单、逐跳公网 DNS/IP、TLS、robots 与流式字节限制；官方服务断网处理；纯 Python HTML 提取 |
 | Git 原仓库历史 | 主机 `.git` 不进入快照；验收使用容器临时仓库，不能据此声称 Worker 已可读取主机提交历史 |
 
 协议由固定 SDK 1.x 协商，当前可选依赖要求 `mcp>=1.30,<2`。实现边界参考 [stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)与[工具规范](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)。Everything 的工具通过不等于全部 MCP 能力通过。

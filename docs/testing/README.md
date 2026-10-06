@@ -1,20 +1,20 @@
 # 最新测试总览
 
-当前 `dev/agent-ecosystem` 保留 E1/E2 提交 `8cfa764`，本轮提交官方 Memory，尚未合入主线。候选冻结 253 文件，清单 SHA256 `b5bbda91d094e07fc8b7c3e37422a1bdaac440e4bba7608f43565d409d1e91e5`；240 个 Python/pyproject 文件清单 SHA256 `047ec74d4669214533bf1daa77d30a088c3f9ebcf3092e5d86b31b9738ae2542`。公开文档随后整理，代码摘要单独核对。
+当前 `dev/agent-ecosystem` 保存 E1/E2 提交 `8cfa764` 与 Memory 提交 `ee76d67`，受控 Fetch 随本阶段提交保存，尚未合入主线。验收候选冻结 258 文件，清单 SHA256 `a42ff2972b85525600aff70e93ac2766dbf1e0f3090c58fab5aa90365bad8ee9`；245 个 Python/pyproject 文件清单 SHA256 `c23d322e587c03eec57c483cbc24a3f8fcc461e64df7fd6da3e541008e8497d0`。公开文档随后整理，提交前再次核对代码摘要，未重跑源码未变的测试。
 
-截至 **2026-10-06**，当前候选 Windows **805 passed、202 skipped**；独立 Ubuntu VM **1006 passed、1 skipped**，两端 Ruff/Pyright 通过，VM 包含 **75 个真实 Podman 用例**，付费模型调用 0。真实社区矩阵、判据和边界见[工具与能力测试](tools-and-skills.md)。基础主线历史完整验收源码为 [`0335117`](https://github.com/beforgeted/MindCode/commit/0335117abf967fde916b87fc490fff3ac2428f05)，以下历史数字不能替代本次新代码验收。
+截至 **2026-10-06**，当前候选 Windows **839 passed、211 skipped**；独立 Ubuntu VM **1049 passed、1 skipped**，两端 Ruff/Pyright 通过，VM 包含 **84 个真实 Podman 用例**，付费模型调用 0。真实社区矩阵、判据和边界见[工具与能力测试](tools-and-skills.md)。基础主线历史完整验收源码为 [`0335117`](https://github.com/beforgeted/MindCode/commit/0335117abf967fde916b87fc490fff3ac2428f05)，以下历史数字不能替代本次新代码验收。
 本目录按主题维护当前结果，不追加每个开发阶段的流水；原始记录和个人现场留在本地忽略目录。
 
 ## MCP / Skill 生态最终完整结果
 
 | 环境 | 收集 | 通过 | 跳过 | 失败 / 错误 | 静态检查 |
 |---|---:|---:|---:|---:|---|
-| Windows | 1007 | **805** | **202** | 0 / 0 | Ruff / Pyright 通过 |
-| 独立 Ubuntu VM | 1007 | **1006** | **1** | 0 / 0 | Ruff / Pyright 通过 |
+| Windows | 1050 | **839** | **211** | 0 / 0 | Ruff / Pyright 通过 |
+| 独立 Ubuntu VM | 1050 | **1049** | **1** | 0 / 0 | Ruff / Pyright 通过 |
 
-固定语料包含 149 个真实社区顶层/归档包，此前与官方参考验证器一致；本轮 VM 的 149 个包完整匹配，Windows 148 个完整匹配、vulnerability-triage 缺 scripts/triage.py，因此该包不能算 Windows 完整兼容通过。项目 pytest 通过不等于所有测试输入完整。Time、Filesystem、Everything、Git、Memory 为真实官方服务；固定 Provider 仅控制任务流程。专项包含在全量中，不能相加；实现通过不代表模型质量提升。
+固定语料包含 149 个真实社区顶层/归档包，此前与官方参考验证器一致；本轮 VM 的 149 个包完整匹配，Windows 148 个完整匹配、vulnerability-triage 缺 scripts/triage.py，因此该包不能算 Windows 完整兼容通过。项目 pytest 通过不等于所有测试输入完整。Time、Filesystem、Everything、Git、Memory、Fetch 为真实官方服务，Fetch 使用受控网络与离线传输适配；固定 Provider 仅控制任务流程。专项包含在全量中，不能相加；实现通过不代表模型质量提升。
 
-VM 生态专项111/111，含34项真实容器；全量75项真实容器包括基础36、Skill2、随附MCP3、社区10、可执行能力13、Memory11。双平台代码与矩阵依赖一致，148个社区包内容一致，另1个Windows包存在已记录的输入缺口；42份VM证据逐项核对，归档含清单共43文件，SHA256 `f056e65008e640b625fde144e1594ff0c4abb4b7de2a9b84bc10b9581db8bde0`。原仓库与历史不变，容器已清理。Memory专项28/28验证跨调用状态、域内串行、双域隔离、关闭、失败废弃与独立验收发布；完整1007项已包括该专项。
+全量中的生态相关用例154/154，含43项真实容器；全量84项真实容器包括基础36、Skill2、随附MCP3、社区10、可执行能力13、Memory11、Fetch9。双平台代码与矩阵依赖一致，148个社区包内容一致，另1个Windows包存在已记录的输入缺口；61份VM证据逐项核对，归档含清单共62文件，SHA256 `9bee785fc46decc6ba18c775fcbdd088bc1f6d357a7e918867d73ab36caa88d2`。原仓库与历史不变，容器已清理。Fetch专项43/43及Memory28/28均已包含在1050项中，不相加。
 
 ## 基础主线历史完整结果与统计口径
 
@@ -103,4 +103,4 @@ podman ps -a --format json
 后续改变源码时，更新验收版本、对应环境结果和本次失败修复；不要用旧全量结果覆盖新版本。
 源码未变的文档调整只做文档检查，明确说明未重跑测试。失败、跳过、模拟与真实执行必须分别说明。
 
-MCP/Skill 生态 E1/E2 已保存于功能分支，E3 的 Memory 状态与生命周期部分完成。下一项 Fetch 受控网络，随后 Knowledge。真实模型效果对照另行安排并取得新的数据与额度授权；既有校准消融留在实验分支。
+MCP/Skill 生态 E1/E2 与 Memory 已保存于功能分支，E3 的文件状态与受控网络一期完成，Fetch 随本阶段提交保存。下一项 Knowledge 只读索引。长期服务缓存、重连、远程 HTTP/OAuth 仍未支持；真实模型效果对照另行安排并取得新的数据与额度授权，既有校准消融留在实验分支。

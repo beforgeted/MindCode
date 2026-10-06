@@ -62,7 +62,7 @@ class McpConfig:
         for item in data['servers']:
             fields = {'id', 'command', 'container_command', 'catalog', 'catalog_sha256', 'tools'}
             if (not isinstance(item, dict) or not fields <= set(item)
-                    or set(item) - fields - {'resources', 'prompts', 'workspace_memory'}
+                    or set(item) - fields - {'resources', 'prompts', 'workspace_memory', 'fetch'}
                     or not isinstance(item['catalog'], str) or not isinstance(item['tools'], dict)
                     or len(item['tools']) > 64
                     or not isinstance(item['command'], list)
@@ -104,7 +104,19 @@ class McpConfig:
                     if len(matches) != 1:
                         raise ValueError('authorized MCP resource/prompt missing or duplicated')
                     context_grants.append(McpContextGrant(kind, name, json.dumps(matches[0])))
+            fetch_policy = None
+            if 'fetch' in item:
+                from codeagent.execution.fetch import FetchPolicy
+                policy = item['fetch']
+                if (not isinstance(policy, dict) or 'hosts' not in policy
+                        or set(policy) - {'hosts', 'max_bytes', 'max_redirects', 'timeout_seconds'}
+                        or not isinstance(policy['hosts'], list)):
+                    raise ValueError('invalid controlled Fetch policy')
+                fetch_policy = FetchPolicy(tuple(policy['hosts']),
+                    policy.get('max_bytes', 1024 * 1024), policy.get('max_redirects', 3),
+                    policy.get('timeout_seconds', 30))
             servers.append(McpServer(item['id'], tuple(item['command']),
                                      tuple(item['container_command']), tuple(grants),
-                                     tuple(context_grants), item.get('workspace_memory', False)))
+                                     tuple(context_grants), item.get('workspace_memory', False),
+                                     fetch_policy))
         return cls(tuple(data.get('project_tools', [])), tuple(servers))

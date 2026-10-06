@@ -11,6 +11,7 @@ import hashlib
 import importlib.metadata
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 from codeagent.evidence.artifact_store import FileArtifactStore
@@ -72,6 +73,12 @@ async def prepare(args) -> None:
                                   '@modelcontextprotocol/server-memory/dist/index.js'],
             'tool': 'read_graph', 'arguments': {}, 'expected': 'entities',
         }
+    if args.fetch:
+        servers['fetch'] = {
+            'command': [python, '-m', 'mcp_server_fetch'],
+            'container_command': ['python3', '-m', 'mcp_server_fetch'],
+            'tool': 'fetch', 'arguments': {}, 'expected': 'Contents of',
+        }
     ctx = ToolExecutionContext(
         agent_run_id='operator', session_id='matrix', tool_run_id='discovery', call_id='discovery',
         workspace=WorkspaceContext.local(output), cancellation=CancellationToken(),
@@ -93,6 +100,9 @@ async def prepare(args) -> None:
     if args.memory_node_root is not None:
         raw = await asyncio.to_thread((memory_root / 'server-memory/package.json').read_text)
         versions['@modelcontextprotocol/server-memory'] = json.loads(raw)['version']
+    if args.fetch:
+        raw = await asyncio.to_thread((root / 'mcp/src/fetch/pyproject.toml').read_text)
+        versions['mcp-server-fetch-source'] = tomllib.loads(raw)['project']['version']
     await asyncio.to_thread((output / 'fixture.json').write_text,
                             json.dumps(fixture, indent=2), encoding='utf-8')
     await asyncio.to_thread((output / 'skill-census.json').write_text,
@@ -110,6 +120,8 @@ def main() -> None:
     parser.add_argument('--node', type=Path, required=True)
     parser.add_argument('--node-root', type=Path, required=True)
     parser.add_argument('--memory-node-root', type=Path)
+    parser.add_argument('--fetch', action='store_true',
+                        help='discover an installed official Fetch server; no HTTP calls')
     parser.add_argument('--output', type=Path, required=True)
     asyncio.run(prepare(parser.parse_args()))
 
