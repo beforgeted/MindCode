@@ -1,6 +1,6 @@
 # MCP 与 Skill 真实社区兼容测试
 
-当前验收对象为 `dev/agent-ecosystem`，基于 Skill 检查点 `2416a72`，整合 MCP 基础并新增社区兼容层，尚未合入 `main`。使用说明见[Skill](../skills.md)与[MCP](../mcp-tools.md)。Linux 测试仅在独立 Ubuntu VM 运行，禁止 WSL。
+当前 `main` 包含声明式 Skill 与社区 stdio MCP 兼容层，需显式配置及授权；发布源码验收检查点为 `e3f87c8`。使用说明见[Skill](../skills.md)与[MCP](../mcp-tools.md)。Linux 测试仅在独立 Ubuntu VM 运行，禁止 WSL。
 
 ## 固定输入与统计口径
 
@@ -39,16 +39,16 @@ Resources/Prompts 已按精确 URI/名称授权为 Agent 工具：固定描述�
 
 ## 最新完整验收
 
-当前全量已包含 Knowledge 候选。全量冻结 **267文件/252代码文件**，源码清单 `e4492177600f7393e2ccaa8b7bade5289050bf8746808d3f412b0cbde874d523`，代码清单 `bd61cbfd9b7061f1d79cc19122df1a971fd737d96aaebf02e1cbaf345b7d595f`。Fetch 已提交 `84db854`，Knowledge 实现保存在功能分支，尚未合入主线。验收后仅修正评估器的 Windows 路径统计，单独复验双平台评估器与静态检查，251个其它代码/测试文件不变；当前代码清单 `ed3dc650d8f42c8d9a20dc6508722d9387f5de7739db91bd64fdaf81f277af87`。详见[Knowledge 测试](knowledge.md)。
+当前全量已包含 Knowledge 修复。`e3f87c8` 冻结 **256份代码、测试、场景与项目配置文件**，清单 SHA256 `d8e7696912f0ad386cf3a8bdaf0559773696c1442cc758f6b8855a8d14d60aad`，双平台逐文件匹配。发布收尾仅调整文档，验收源码不变，未重跑全量；历史功能版本摘要与结果见[Knowledge 测试](knowledge.md)。
 
 | 环境 | 收集 | 通过 | 跳过 | 失败 / 错误 | 静态检查 |
 |---|---:|---:|---:|---:|---|
-| Windows | 1105 | **883** | **222** | 0 / 0 | Ruff / Pyright 通过 |
-| 独立 Ubuntu VM | 1105 | **1104** | **1** | 0 / 0 | Ruff / Pyright 通过 |
+| Windows | 1146 | **922** | **224** | 0 / 0 | Ruff / Pyright 通过 |
+| 独立 Ubuntu VM | 1146 | **1145** | **1** | 0 / 0 | Ruff / Pyright 通过 |
 
-全量中的生态相关用例 **154/154**（43真实容器）保持通过；新增 Knowledge **55/55**（9真实容器），全量共 **93 个真实 Podman 用例**（既有84 + Knowledge9），均包含在1105项中。Windows跳过既有211项、Knowledge的9个容器及2个符号链接用例，共222；VM仅跳过一个不适用的平台用例。Fetch43/43、Memory28/28包含在全量中，不相加。
+全量中的生态相关用例 **154/154**（43真实容器）保持通过；Knowledge **67/67**（11真实容器），全量共 **95 个真实 Podman 用例**（既有84 + Knowledge11），均包含在1146项中。Windows跳过既有211项、Knowledge的11个容器及2个符号链接用例，共224；VM仅跳过一个不适用的平台用例。Fetch43/43、Memory28/28包含在全量中，不相加。
 
-双平台全量使用相同冻结源码与矩阵依赖版本；VM证据归档 SHA256 `9228680357ae89981f2c3d9bc1064394acf1369040666b507f0e21a296ee8d03`，原始日志位于已忽略的 `.codeagent/validation/knowledge/`。VM核对为独立Ubuntu VMware来宾，无WSL；原仓库/历史记录不变，容器为空，付费模型调用0。旧Fetch依赖与源码验证记录保留。Windows148个社区包与VM完整匹配，另1包存在下述输入缺口，不将pytest通过冒充完整跨平台语料一致。
+双平台全量使用相同冻结源码与矩阵依赖版本；最新VM证据归档 SHA256 `f1d96805f919ca9c8ab288ae6a6369b30747b83096a513b3e3cda87a05852d5c`，原始日志位于已忽略的 `.codeagent/validation/knowledge-fix/`。VM核对为独立Ubuntu VMware来宾，无WSL；原仓库/历史记录不变，容器为空，修复回归付费模型调用0。历史Fetch与Knowledge功能验收记录保留，原模型消融另见Knowledge专项。Windows148个社区包与VM完整匹配，另1包存在下述输入缺口，不将pytest通过冒充完整跨平台语料一致。
 
 原始失败包括 SDK 将单个 ValueError 包装成 ExceptionGroup，以及私有 umask 导致打包后 Node 的目录/文件不可被容器非 root 用户读取执行。前者保留单一叶异常类别，后者以新镜像标签修复依赖权限；失败日志、首次镜像和原仓库现场保留在忽略目录，原有隔离约束没有放宽。
 
@@ -75,4 +75,4 @@ Fetch 增加 `--fetch` 仅发现已安装的官方服务。使用固定上游源
 
 首次 Fetch 容器夹具重复创建目录，8 个用例未进入实际调用；按记录的镜像/所有者逐项回收残留容器，保留失败日志。真实 HTML 随后暴露 readabilipy 自动尝试 npm 安装，改为显式纯 Python 路径并断言不启动 Node/npm。GitHub 直连重置未算作下载超限；PyPI 项目页挑战未算作正文获取；PyPI JSON 被官方 robots 禁止，保留为正确拒绝，未绕过规则。最终改用 robots 允许的官方 Python 文档验证 HTTPS 与页面字节上限。离线的合成 HTML/重定向/故障响应检验真实服务及拒绝路径，不冒充真实公网跳转或浏览器渲染验收。
 
-本轮验证结构、协议、权限、状态、网络与Knowledge引用契约，没有付费模型或效果消融。Knowledge一期已完成，离线对照见[专项](knowledge.md)。没有长期进程缓存、状态语义合并或浏览器JavaScript渲染。
+上述工程回归验证结构、协议、权限、状态、网络与Knowledge引用契约，没有付费模型调用。Knowledge一期已完成，历史离线对照与另行授权的人工Flash消融见[专项](knowledge.md)，不能据工程回归推断效果收益。没有长期进程缓存、状态语义合并或浏览器JavaScript渲染。

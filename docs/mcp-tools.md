@@ -1,6 +1,6 @@
 # MCP：显式社区接入与执行边界
 
-当前实现位于 `dev/agent-ecosystem`，尚未合入 `main`。保留随附只读服务，新增固定目录的社区 stdio 服务；真实验收见[工具与能力测试](testing/tools-and-skills.md)。
+当前 `main` 已包含随附只读服务与固定目录的社区 stdio 服务，以及隔离的 Memory 状态和受控 Fetch 网络传输；社区服务需显式配置及逐项授权。发布源码验收检查点为 `e3f87c8`；真实验收见[工具与能力测试](testing/tools-and-skills.md)。
 
 ## 社区服务怎么接入
 

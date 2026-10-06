@@ -1,6 +1,6 @@
 # MindCode 系统架构
 
-本文描述基础 `main`（`16c669b`）与 `dev/agent-ecosystem` 的 Skill/MCP 生态结构；基础 Skill 检查点为 `2416a72`，社区接入改动尚未合入主线。测试结果见[最新测试总览](testing/README.md)。
+本文描述当前 `main` 的基础编排、沙箱与 Skill/MCP/Knowledge 结构。社区接入需显式配置，Knowledge 默认关闭；发布源码验收检查点为 `e3f87c8`，包括响应预算与执行域失效终止修复。测试结果见[最新测试总览](testing/README.md)。
 
 ## 模块与职责
 

@@ -1,6 +1,6 @@
 # Skill：声明式专项 Agent
 
-当前 `dev/agent-ecosystem` 基于 Skill 检查点 `2416a72`，已整合 MCP 基础与社区包接入，尚未合入 `main`。测试见[工具与能力测试](testing/tools-and-skills.md)。
+当前 `main` 已包含声明式 Skill 与社区包接入，需显式安装依赖和配置，默认普通会话不加载 Skill。发布源码验收检查点为 `e3f87c8`；测试见[工具与能力测试](testing/tools-and-skills.md)。
 
 ## 解决的问题与取舍
 

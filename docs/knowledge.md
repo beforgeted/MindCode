@@ -1,6 +1,6 @@
 # Knowledge 只读索引
 
-功能分支提供显式查询的项目知识索引。设置 `CODEAGENT_KNOWLEDGE=1` 后注册 `knowledge_search` 与 `knowledge_get`，默认关闭；使用 `AppConfig(knowledge_enabled=True)` 也可开启。配置仅接受布尔值，环境开关仅接受 `0`/`1`。Agent 与 Skill 的工具白名单继续生效，注册不代表每个 Agent 都获准调用。
+`main` 提供显式查询的项目知识索引。设置 `CODEAGENT_KNOWLEDGE=1` 后注册 `knowledge_search` 与 `knowledge_get`，默认关闭；使用 `AppConfig(knowledge_enabled=True)` 也可开启。配置仅接受布尔值，环境开关仅接受 `0`/`1`。Agent 与 Skill 的工具白名单继续生效，注册不代表每个 Agent 都获准调用。
 
 Knowledge 回答“当前项目在哪里定义、写了什么”，长期 Memory 保存跨任务经验，官方 MCP Memory 图谱属于候选文件产物，三者独立。索引只保存可重建的派生数据，不参与任务恢复、独立验收或发布判定，不自动向每轮上下文注入内容，也不调用模型、向量服务或外部网络。
 
