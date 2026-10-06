@@ -2,7 +2,7 @@
 
 当前 `dev/agent-ecosystem` 保存 E1/E2 `8cfa764`、Memory `ee76d67` 与 Fetch `84db854`；Knowledge 实现保存在功能分支，尚未合入主线。全量验收冻结267文件，源码清单 `e4492177600f7393e2ccaa8b7bade5289050bf8746808d3f412b0cbde874d523`，252代码文件清单 `bd61cbfd9b7061f1d79cc19122df1a971fd737d96aaebf02e1cbaf345b7d595f`。随后仅修正检索评估器的 Windows 路径统计，251个其它代码/测试文件未变，修正后分别复验双平台评估器及静态检查；当前252代码清单 `ed3dc650d8f42c8d9a20dc6508722d9387f5de7739db91bd64fdaf81f277af87`。公开文档在验收后整理。
 
-本轮 Knowledge 候选 Windows **883 passed、222 skipped**；独立 Ubuntu VM **1104 passed、1 skipped**，两端 Ruff/Pyright 通过，VM 包含 **93 个真实 Podman 用例**，付费模型调用 0。新模块判据与检索边界见[Knowledge 测试](knowledge.md)，社区兼容见[工具与能力测试](tools-and-skills.md)。以下基础主线历史数字不能替代本次新代码验收。
+本轮 Knowledge 候选 Windows **883 passed、222 skipped**；独立 Ubuntu VM **1104 passed、1 skipped**，两端 Ruff/Pyright 通过，VM 包含 **93 个真实 Podman 用例**，该功能回归付费模型调用 0；另行授权的人工Flash对照共227次真实生成，账户余额差0.23元，结果与边界见[Knowledge测试](knowledge.md)。新模块判据与检索边界见[Knowledge 测试](knowledge.md)，社区兼容见[工具与能力测试](tools-and-skills.md)。以下基础主线历史数字不能替代本次新代码验收。
 本目录按主题维护当前结果，不追加每个开发阶段的流水；原始记录和个人现场留在本地忽略目录。
 
 ## 当前完整回归（含生态与 Knowledge）
@@ -105,4 +105,4 @@ podman ps -a --format json
 后续改变源码时，更新验收版本、对应环境结果和本次失败修复；不要用旧全量结果覆盖新版本。
 源码未变的文档调整只做文档检查，明确说明未重跑测试。失败、跳过、模拟与真实执行必须分别说明。
 
-MCP/Skill E1/E2 与 Memory/Fetch 已保存于功能分支，Knowledge 只读索引一期完成，该实现保存在功能分支，默认关闭。下一阶段是固定任务下的能力效果评测；离线检索正确不能直接证明模型任务成功率或费用收益，真实模型试验仍需新的数据与额度授权。长期服务缓存、重连、远程 HTTP/OAuth 保留为未支持边界。
+MCP/Skill E1/E2 与 Memory/Fetch 已保存于功能分支，Knowledge 只读索引一期完成，该实现保存在功能分支，默认关闭。人工Flash小样本对照未观察到稳定收益，并保留低输出限额导致域销毁的失败；下一步先修复该缺口，后续新模型批次另行授权。长期服务缓存、重连、远程 HTTP/OAuth 保留为未支持边界。

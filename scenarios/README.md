@@ -128,6 +128,34 @@ CODEAGENT_EXECUTION_BACKEND=podman、CODEAGENT_SANDBOX_IMAGE为已安装的完�
 沙箱判据见[沙箱与恢复测试](../docs/testing/sandbox-and-recovery.md)。个人现场与原始报告不随仓库发布。
 历史11场景回归不是19任务benchmark或SWE-bench成绩；verify_fail还需核对Worker确实完成、
 验收拒绝、base不动与产物不存在，避免把没有发生的写入误报为隔离成功。
-# Knowledge 离线检索对照
+## Knowledge 离线检索对照
 
 `python -m scenarios.knowledge_evaluation --root <冻结公开源码副本> --output <新私有输出目录>` 在真实 MindCode 源码执行 easy→medium→hard 六项查询，并与现有 grep 的同字面查询比较。基线直接使用现有 GrepTool，应只对不含私有内容的冻结公开源码副本执行；不要把实时私人工作目录作为基线输入。报告记录来源命中、引用完整文本校验、输出估算 Token、调用数、机器及时间，没有模型调用或模型质量结论。更多判据见[Knowledge 测试](../docs/testing/knowledge.md)。
+
+## Knowledge 实际模型开关试验
+
+`scenarios.knowledge_ablation` 是显式实验入口，仅在独立 Linux VM 运行，拒绝 WSL；不替代普通应用会话或完整编排验收。`knowledge_tasks` 固定六个人工加法、计价、权重任务，easy→medium→hard，每项两轮、轮换 off/on 次序，共24组。使用项目的 ReActEngine、工具执行与真实 Podman；两组同任务、提示与限额，仅 on 多注册 Knowledge 两个工具，不强迫模型调用。原有 grep/read_file/run_command 均保留。
+
+先进行不付费的 Oracle 正负例预检：
+
+```bash
+python -m scenarios.knowledge_ablation --precheck-only \
+  --output <新的私有输出目录> --image <已安装受信镜像的完整SHA256> \
+  --source-commit <验收功能提交>
+```
+
+获得本轮数据、端点和额度授权后，才使用付费入口：
+
+```bash
+python -m scenarios.knowledge_ablation \
+  --output <另一个新的私有输出目录> --image <同一受信镜像完整SHA256> \
+  --source-commit <验收功能提交> --credentials <已有私有env文件> --budget-cny 6
+```
+
+端点固定 `https://api.deepseek.com/anthropic`，模型固定 `deepseek-flash`，关闭思考、SDK重试为0；不启用 Planner、模型 Judge、后台 Memory 或远程 Token 计数。每组最多12次生成、输出2048 Token、请求64KiB；整批最多288次生成与30分钟，金额上限不超过6元及初始可用人民币余额。开始前和每次生成前查询余额，先落盘保守预留，再按返回 usage 结算；未知结果、未知计费、超限停止整批且不清空预留。不自动重放、重启批次或调用备用模型。
+
+预留按官方高峰价（输入2元/百万、输出8元/百万）和请求UTF-8字节加额外开销估计；字节数不是供应商精确分词上界，因此这是保守准入机制，不能承诺完整账单绝不超限。缓存折扣/空闲价使 usage 上限高于真实扣费；报告分别保存上限与账户余额变化，账户变化也可能受其它调用影响。余额GET次数另计，不混入生成调用。
+
+所有模型可见文件均为人工候选；私有 Oracle 与参考修复只在独立验收域使用，验收内容不反馈给模型。记录输入哈希、请求/响应、工具轨迹、候选和独立测试，并要求仅改任务允许的实现文件。没有向main发布。这个小集合没有大仓库检索难度、任务分布或统计显著性的代表性；对照应同时报告成功率、Knowledge实际使用率、Token/费用及耗时，不能只挑通过个案。
+
+本次已完成的小样本与原始失败见[Knowledge验收](../docs/testing/knowledge.md)。仅在已有账本证据明确旧消耗时，续接用 `--prior-reservation-cny` 扣除旧usage上限和未结预留、`--prior-generation-attempts` 扣除旧尝试；`--seconds` 只能使用剩余时间，禁止通过新目录清零额度。`--tasks quote` 仅选择已固定的人工任务用于合同校正，不接受任意新增任务。
