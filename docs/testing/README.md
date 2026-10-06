@@ -1,20 +1,20 @@
 # 最新测试总览
 
-当前 `dev/agent-ecosystem` 保存 E1/E2 `8cfa764`、Memory `ee76d67` 与 Fetch `84db854`；Knowledge 实现保存在功能分支，尚未合入主线。全量验收冻结267文件，源码清单 `e4492177600f7393e2ccaa8b7bade5289050bf8746808d3f412b0cbde874d523`，252代码文件清单 `bd61cbfd9b7061f1d79cc19122df1a971fd737d96aaebf02e1cbaf345b7d595f`。随后仅修正检索评估器的 Windows 路径统计，251个其它代码/测试文件未变，修正后分别复验双平台评估器及静态检查；当前252代码清单 `ed3dc650d8f42c8d9a20dc6508722d9387f5de7739db91bd64fdaf81f277af87`。公开文档在验收后整理。
+当前 `ablation/knowledge` 保存基于功能cad4733与实验a69dfa7的Knowledge预算/执行域终止修复，尚未合入主线，默认关闭。冻结256份代码、测试、场景与项目配置清单 SHA256 `d8e7696912f0ad386cf3a8bdaf0559773696c1442cc758f6b8855a8d14d60aad`，Windows与独立VM逐文件匹配。历史功能版本的冻结摘要保留在[Knowledge测试](knowledge.md)。
 
-本轮 Knowledge 候选 Windows **883 passed、222 skipped**；独立 Ubuntu VM **1104 passed、1 skipped**，两端 Ruff/Pyright 通过，VM 包含 **93 个真实 Podman 用例**，该功能回归付费模型调用 0；另行授权的人工Flash对照共227次真实生成，账户余额差0.23元，结果与边界见[Knowledge测试](knowledge.md)。新模块判据与检索边界见[Knowledge 测试](knowledge.md)，社区兼容见[工具与能力测试](tools-and-skills.md)。以下基础主线历史数字不能替代本次新代码验收。
+本轮 Knowledge 候选 Windows **922 passed、224 skipped**；独立 Ubuntu VM **1145 passed、1 skipped**，两端 Ruff/Pyright 通过，VM 包含 **95 个真实 Podman 用例**，该功能回归付费模型调用 0；另行授权的人工Flash对照共227次真实生成，账户余额差0.23元，结果与边界见[Knowledge测试](knowledge.md)。新模块判据与检索边界见[Knowledge 测试](knowledge.md)，社区兼容见[工具与能力测试](tools-and-skills.md)。以下基础主线历史数字不能替代本次新代码验收。
 本目录按主题维护当前结果，不追加每个开发阶段的流水；原始记录和个人现场留在本地忽略目录。
 
 ## 当前完整回归（含生态与 Knowledge）
 
 | 环境 | 收集 | 通过 | 跳过 | 失败 / 错误 | 静态检查 |
 |---|---:|---:|---:|---:|---|
-| Windows | 1105 | **883** | **222** | 0 / 0 | Ruff / Pyright 通过 |
-| 独立 Ubuntu VM | 1105 | **1104** | **1** | 0 / 0 | Ruff / Pyright 通过 |
+| Windows | 1146 | **922** | **224** | 0 / 0 | Ruff / Pyright 通过 |
+| 独立 Ubuntu VM | 1146 | **1145** | **1** | 0 / 0 | Ruff / Pyright 通过 |
 
 固定语料包含 149 个真实社区顶层/归档包，此前与官方参考验证器一致；本轮 VM 的 149 个包完整匹配，Windows 148 个完整匹配、vulnerability-triage 缺 scripts/triage.py，因此该包不能算 Windows 完整兼容通过。项目 pytest 通过不等于所有测试输入完整。Time、Filesystem、Everything、Git、Memory、Fetch 为真实官方服务，Fetch 使用受控网络与离线传输适配；固定 Provider 仅控制任务流程。专项包含在全量中，不能相加；实现通过不代表模型质量提升。
 
-全量中的生态相关154/154（43真实容器）与Knowledge55/55（9真实容器）均已包含在1105项中，不能相加。全量93个真实容器包含既有84项及新增9项。VM证据归档 SHA256 `9228680357ae89981f2c3d9bc1064394acf1369040666b507f0e21a296ee8d03`；源码、原仓库及历史不变，容器为空。Windows社区输入缺口仍按上述边界记录。
+全量中的生态相关154/154（43真实容器）与Knowledge67/67（11真实容器）均包含在1146项中，不能相加。全量95个真实容器包含原有93项及新增2项。低输出限额、缓存舍弃、引用完整性与域失效终止均通过；源码与历史记录保留，容器为空。Windows社区输入缺口仍按上述边界记录。
 
 ## 基础主线历史完整结果与统计口径
 

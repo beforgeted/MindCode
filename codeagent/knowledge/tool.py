@@ -36,7 +36,9 @@ class KnowledgeTool(BaseTool):
                           'limit': {'type': 'integer', 'minimum': 1, 'maximum': 20},
                           'expected_version': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}}
             required = ['query']
-            description = '查询当前项目路径、Python符号与文档段落；返回版本摘要和来源行号。'
+            description = ('查询当前项目路径、Python符号与文档段落；返回版本摘要和来源行号。'
+                           '按字面词项匹配：所有词须出现在同一条记录的名称、路径或片段内；'
+                           '不做语义检索。无匹配时减少词项或分别查询。')
         else:
             properties = {'path': {'type': 'string'},
                           'start_line': {'type': 'integer', 'minimum': 1},
@@ -66,8 +68,16 @@ class KnowledgeTool(BaseTool):
         state = executor.knowledge
         async with asyncio.timeout(ctx.timeout_seconds), state.lock:
             scope = str(ctx.workspace.root)
+            transport_limit = index.MAX_ENVELOPE
+            if isinstance(executor, SandboxExecutor):
+                transport_limit = min(transport_limit, executor.manager.limits.output_bytes)
+            if transport_limit < 64:
+                return ToolResult.error(
+                    call, 'Knowledge transport limit is too small; use read_file/grep')
+            result_limit = min(ctx.max_output_bytes, 128 * 1024)
             cache = state.cache if state.cache.get('scope') == scope else {}
             payload = json.dumps({'action': self.action, 'arguments': arguments,
+                                  'transport_limit': transport_limit, 'result_limit': result_limit,
                                   'cache': cache}, ensure_ascii=False).encode()
             if len(payload) > index.MAX_ENVELOPE:
                 state.cache = {}
@@ -75,13 +85,13 @@ class KnowledgeTool(BaseTool):
             if isinstance(executor, SandboxExecutor):
                 output = await executor.manager.execute_python(
                     executor.handle, self._source, payload, cancellation=ctx.cancellation,
-                    max_output_bytes=index.MAX_ENVELOPE,
+                    max_output_bytes=transport_limit,
                 )
             else:
                 output = await run_bounded(
                     [sys.executable, '-I', '-c', self._source, str(ctx.workspace.root)],
                     data=payload, timeout_seconds=ctx.timeout_seconds,
-                    cancellation=ctx.cancellation, max_bytes=index.MAX_ENVELOPE,
+                    cancellation=ctx.cancellation, max_bytes=transport_limit,
                 )
             try:
                 data = json.loads(output.stdout)
@@ -89,10 +99,14 @@ class KnowledgeTool(BaseTool):
                     state.cache = {}
                     if data.get('error') == 'StaleIndex':
                         return ToolResult.error(call, 'Knowledge引用已失效，请重新搜索')
+                    if data.get('error') in ('ResultLimit', 'TransportLimit'):
+                        return ToolResult.error(
+                            call, 'Knowledge result exceeds limit; narrow query '
+                            'or use read_file/grep')
                     return ToolResult.error(call, 'Knowledge index unavailable; use read_file/grep')
                 body = json.dumps({k: data[k] for k in ('index_version', 'result', 'stats')},
                                   ensure_ascii=False)
-                state.cache = {**data['cache'], 'scope': scope}
+                state.cache = {**data['cache'], 'scope': scope} if 'cache' in data else {}
             except (ValueError, KeyError, TypeError):
                 state.cache = {}
                 return ToolResult.error(call, 'Knowledge index protocol rejected')

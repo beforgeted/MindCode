@@ -86,6 +86,10 @@ class ReActEngine:
         while run.context.react_iteration < run.definition.max_react_iterations:
             if run.cancellation.cancelled:
                 return self._finish(run, RunStatus.CANCELLED, "用户取消", collected)
+            if (run.sandbox is not None
+                    and not run.sandbox.executor.manager.is_active(run.sandbox.executor.handle)):
+                return self._finish(
+                    run, RunStatus.FAILED, "执行域已封存或关闭，需要重新建立执行域", collected)
 
             run.context.react_iteration += 1
             self._metrics.incr(M.REACT_ITERATIONS)
@@ -149,6 +153,9 @@ class ReActEngine:
 
             if outcome.cancelled:
                 return self._finish(run, RunStatus.CANCELLED, "工具调用被取消", collected)
+            if outcome.execution_domain_closed:
+                return self._finish(
+                    run, RunStatus.FAILED, "执行域已封存或关闭，需要重新建立执行域", collected)
 
         return self._finish(
             run,

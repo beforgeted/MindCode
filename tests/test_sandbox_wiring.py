@@ -38,6 +38,9 @@ class MemorySandbox(PodmanSandboxManager):
     async def ensure_available(self):
         pass
 
+    def is_active(self, handle):
+        return handle.owner == self.owner and handle.container_id in self.domains
+
     async def open(self, snapshot, purpose=ExecutionPurpose.WORKER):
         cid = str(len(self.calls))
         handle = SandboxHandle(cid, cid, self.owner, purpose, 1, "1")

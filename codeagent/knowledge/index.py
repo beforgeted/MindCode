@@ -310,6 +310,22 @@ def invoke(root: Path, action: str, arguments: Any, cache: dict | None = None) -
     return response
 
 
+def bounded_response(response: dict, transport_limit: int, result_limit: int) -> dict:
+    """Budget the visible result and internal cache separately before stdout."""
+    if (type(transport_limit) is not int or not 64 <= transport_limit <= MAX_ENVELOPE
+            or type(result_limit) is not int or not 0 < result_limit <= MAX_ENVELOPE):
+        raise ValueError('invalid response budget')
+    visible = {key: response[key] for key in ('index_version', 'result', 'stats')}
+    if len(json.dumps(visible, ensure_ascii=False).encode()) > result_limit:
+        return {'error': 'ResultLimit'}
+    if len(json.dumps(response, ensure_ascii=False).encode()) > transport_limit:
+        # A cache is an optional optimization, never a partial result or authority.
+        response = visible
+    if len(json.dumps(response, ensure_ascii=False).encode()) > transport_limit:
+        return {'error': 'TransportLimit'}
+    return response
+
+
 def main() -> None:
     try:
         raw = sys.stdin.buffer.read(MAX_ENVELOPE + 1)
@@ -318,6 +334,8 @@ def main() -> None:
         payload = json.loads(raw)
         root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path('/workspace')
         response = invoke(root, payload['action'], payload['arguments'], payload.get('cache'))
+        response = bounded_response(response, payload.get('transport_limit', MAX_ENVELOPE),
+                                    payload.get('result_limit', MAX_ENVELOPE))
     except (OSError, ValueError, OverflowError, RecursionError) as exc:
         response = {'error': type(exc).__name__}
     sys.stdout.buffer.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))

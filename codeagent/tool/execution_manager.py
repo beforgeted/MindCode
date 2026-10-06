@@ -81,6 +81,7 @@ class ToolBatchOutcome:
     tool_runs: tuple[ToolRun, ...] = ()
     cancelled: bool = False
     ran_serially: bool = False
+    execution_domain_closed: bool = False
 
 
 class ToolExecutionManager:
@@ -150,6 +151,7 @@ class ToolExecutionManager:
             tool_runs=tuple(runs),
             cancelled=cancelled,
             ran_serially=serial,
+            execution_domain_closed=_domain_closed(scope),
         )
 
     def _mode_of(self, name: str) -> ToolConcurrencyMode:
@@ -173,6 +175,13 @@ class ToolExecutionManager:
         )
 
         result = await self._run_guarded(scope, run)
+        if _domain_closed(scope):
+            result = ToolResult(
+                call_id=call.id, tool_name=call.name, status=result.status,
+                content=result.content, exit_code=result.exit_code, artifact=result.artifact,
+                truncated=result.truncated, raw_bytes=result.raw_bytes,
+                metadata={**result.metadata, 'execution_domain_closed': True},
+            )
 
         try:
             result = await self._normalizer.normalize(result, profile=scope.profile)
@@ -184,6 +193,7 @@ class ToolExecutionManager:
                 content=f"{result.content[:2000]}\n[归一化失败: {exc}]",
                 exit_code=result.exit_code,
                 truncated=True,
+                metadata=result.metadata,
             )
 
         result = ToolResult(
@@ -277,6 +287,8 @@ class ToolExecutionManager:
             async with asyncio.timeout(scope.profile.tool_timeout_seconds):
                 async with self._semaphore:
                     async with self._locks.acquire(keys):
+                        if _domain_closed(scope):
+                            return ToolResult.error(call, '执行域已封存或关闭，工具未执行')
                         if scope.sandbox is not None:
                             return await scope.sandbox.execute(tool, ctx, call.arguments)
                         return await tool.execute(ctx, call.arguments)
@@ -287,6 +299,13 @@ class ToolExecutionManager:
         except Exception as exc:  # 绝不能是 BaseException / 裸 except
             run.error = f"{type(exc).__name__}: {exc}"
             return ToolResult.error(call, f"工具执行失败: {type(exc).__name__}: {exc}")
+
+
+def _domain_closed(scope: ExecutionScope) -> bool:
+    if scope.sandbox is None:
+        return False
+    executor = scope.sandbox.executor
+    return not executor.manager.is_active(executor.handle)
 
 
 def _resource_keys(tool: Tool, call: ToolCall) -> tuple[str, ...]:

@@ -299,6 +299,11 @@ class PodmanSandboxManager:
         if not enforced:
             raise SandboxUnavailable("执行域的权限、网络或资源限制未生效")
 
+    def is_active(self, handle: SandboxHandle) -> bool:
+        """Controller lifecycle state; sealed, removed or foreign handles cannot execute."""
+        return (self._handles.get(handle.container_id) is handle and handle.owner == self.owner
+                and self._states.get(handle.container_id) == "active")
+
     def _lock(self, handle: SandboxHandle) -> asyncio.Lock:
         if self._handles.get(handle.container_id) is not handle or handle.owner != self.owner:
             raise SandboxError("无效或已关闭的执行域句柄")
