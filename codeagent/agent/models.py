@@ -64,6 +64,14 @@ class AgentDefinition:
     memory_profile: MemoryProfile = field(default_factory=MemoryProfile)
     # Legacy empty allowed_tools means all. Restricted empty means explicitly none.
     tools_restricted: bool = False
+    # Controller-derived operator capabilities. Never supplied by Skill prose or MCP data.
+    non_replayable_tools: tuple[str, ...] = ()
+
+    @property
+    def automatic_replay_allowed(self) -> bool:
+        if not self.tools_restricted and not self.allowed_tools:
+            return not self.non_replayable_tools
+        return not set(self.allowed_tools).intersection(self.non_replayable_tools)
 
 
 class FileChangeKind(StrEnum):

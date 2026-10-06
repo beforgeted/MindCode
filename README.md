@@ -11,9 +11,10 @@ Python 实现的编码 Agent，支持上下文压缩、证据与长期记忆、�
 - **模型与费用**：七类角色独立模型配置、显式备用链、能力目录、成本记账与 Worker 软阈值路由；按模型和协议限频校准 token 估算。
 - **长期记忆**：SQLite 存储与检索，候选抽取、去重、冲突治理，显式管理和可重建的 MEMORY.md 投影。
 - **专项 Skill（功能分支）**：显式本地配置、Planner 选择与会话切换；权限交集在执行前复核，默认关闭。
+- **社区生态（功能分支）**：加载标准 `SKILL.md` 包、读取冻结配套并显式授权 Python 脚本；社区 stdio MCP 的工具、固定资源和 Prompt 在现有 Podman 域调用，内容不扩大工具权限。
 
 P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准一期已实现并合入 `main`。
-当前 `dev/skills` 从 `main` 的 `16c669b` 独立开发 Skill 一期，已提交、未合入主线。MCP 一期已提交到 `dev/mcp-tools` 的 `1b8323a`，本分支未包含它。后续推进 Knowledge 与独立真实任务评测；上下文实验保存在 `codex/context-optimization-preview`。
+当前 `dev/agent-ecosystem` 基于 Skill 检查点 `2416a72`，整合 MCP 一期 `1b8323a`，补齐真实社区兼容、脚本执行及 Resources/Prompts 运行授权；E1/E2 保存在当前功能分支，尚未合入主线。下一阶段处理 MCP 服务状态与受控网络，Knowledge 和模型效果评测顺延；上下文实验保存在 `codex/context-optimization-preview`。
 
 ## 文档
 
@@ -23,7 +24,8 @@ P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准�
 |---|---|
 | [系统架构](docs/architecture.md) | 主要模块、执行流程、存储职责和失败边界 |
 | [Skill 使用与边界](docs/skills.md) | 配置、会话切换、Planner 选择、权限交集及失败行为 |
-| [工具与能力测试](docs/testing/tools-and-skills.md) | Skill 当前验证与 MCP 分支结果的区别 |
+| [MCP 接入与边界](docs/mcp-tools.md) | 社区服务发现、目录固定、操作者授权和容器内调用 |
+| [工具与能力测试](docs/testing/tools-and-skills.md) | 真实社区矩阵、双平台验收及尚未支持的能力 |
 | [沙箱与恢复](docs/sandbox-and-recovery.md) | Podman、快照发布、受控下载、租约与崩溃恢复 |
 | [模型与上下文](docs/model-and-context.md) | 角色路由、能力目录、成本、压缩、完整证据验收和 token 校准 |
 | [最新测试总览与复现](docs/testing/README.md) | 验收版本、分环境结果、运行方式与证据口径 |
@@ -31,7 +33,7 @@ P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准�
 | [模型与上下文测试](docs/testing/model-and-context.md) | 模型路由、费用、窗口、压缩、验收与校准的统一判据 |
 | [真实模型场景与 benchmark 使用](scenarios/README.md) | 显式启用的真实模型测试入口和任务判据 |
 
-截至 **2026-10-04**，Skill 最终候选 Windows 完整回归 **694 passed、161 skipped**，Ruff/Pyright 通过；独立 Ubuntu VM **854 passed、1 skipped**，包含 **38 个真实 Podman 用例**；两端 Ruff/Pyright 均通过，本轮付费模型调用 0。详见[工具与能力测试](docs/testing/tools-and-skills.md)。
+截至 **2026-10-06**，社区生态最终候选 Windows 完整回归 **790 passed、189 skipped**；独立 Ubuntu VM **978 passed、1 skipped**，包含 **64 个真实 Podman 用例**，两端 Ruff/Pyright 通过，付费模型调用 0。149 个社区包已通过当前加载器和官方参考；完整结果与未支持能力见[工具与能力测试](docs/testing/tools-and-skills.md)。
 
 基础主线代码提交 `0335117` 的历史完整验收：
 
@@ -41,7 +43,7 @@ P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准�
 | 独立 Ubuntu VM | **816 passed、1 skipped**，含 **36 个真实 Podman 用例** | Ruff / Pyright 通过 |
 
 专项用例包含在全量中，不另加总。这些结果验证控制流、真实容器与恢复门禁；尚无新一轮真实模型质量/费用对照结论。
-Linux 测试只在独立 Ubuntu 虚拟机运行，**禁止使用 WSL Ubuntu 跑测试**。当前 Skill 为新代码，已重新冻结并做独立完整验收；主线历史数字单独保留。
+Linux 测试只在独立 Ubuntu 虚拟机运行，**禁止使用 WSL Ubuntu 跑测试**。社区版本独立冻结、独立验收；主线历史数字单独保留。
 
 ## 快速开始
 

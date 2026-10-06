@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from codeagent.execution.models import SandboxError
+from codeagent.skills.resource_tool import SkillResourceTool
+from codeagent.skills.script_tool import SkillScriptTool
 from codeagent.tool.base import Tool, ToolExecutionContext
 from codeagent.tool.builtin.download_file import DownloadFileTool
 from codeagent.tool.builtin.evidence_get import EvidenceGetTool
@@ -20,6 +22,8 @@ from codeagent.tool.builtin.read_file import ReadFileTool
 from codeagent.tool.builtin.run_command import RunCommandTool
 from codeagent.tool.builtin.write_file import WriteFileTool
 from codeagent.tool.executor import SandboxExecutor, sandbox_result
+from codeagent.tool.mcp.community import McpCommunityTool, McpContextTool
+from codeagent.tool.mcp.project_tool import McpProjectTool
 from codeagent.tool.models import ToolCall, ToolResult
 
 
@@ -32,6 +36,7 @@ class SandboxTools:
     ) -> ToolResult:
         if type(tool) in (
             RunCommandTool, ReadArtifactTool, MemoryGetTool, EvidenceGetTool, DownloadFileTool,
+            McpProjectTool, McpCommunityTool, McpContextTool, SkillResourceTool, SkillScriptTool,
         ):
             return await tool.execute(ctx, arguments)
         if type(tool) not in (ReadFileTool, WriteFileTool, GrepTool):

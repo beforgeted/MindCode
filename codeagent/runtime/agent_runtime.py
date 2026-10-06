@@ -118,6 +118,7 @@ class AgentRuntime:
                     while (
                         not verification.ok
                         and not verification.indeterminate
+                        and definition.automatic_replay_allowed
                         and run.reflection_count < definition.max_reflection_count
                     ):
                         run.reflection_count += 1

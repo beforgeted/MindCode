@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
 from types import TracebackType
 
 from codeagent.agent.models import AgentDefinition, AgentRunResult, RunStatus
@@ -40,13 +41,18 @@ from codeagent.memory.sqlite_store import SqliteMemoryStore
 from codeagent.orchestration.cost_store import CostStore
 from codeagent.runtime.interactive_sandbox import InteractiveSandbox
 from codeagent.runtime.react_engine import ReActEngine
+from codeagent.skills.resource_tool import SkillResourceTool
+from codeagent.skills.script_tool import SkillScriptTool
 from codeagent.tool.approval import DenyExternalApprovalPolicy, InteractiveApprovalPolicy
 from codeagent.tool.builtin import default_tools
 from codeagent.tool.builtin.download_file import DownloadFileTool
 from codeagent.tool.builtin.evidence_get import EvidenceGetTool
 from codeagent.tool.builtin.memory_get import MemoryGetTool
 from codeagent.tool.command_policy import CommandPolicy
+from codeagent.tool.effects import RetryPolicy
 from codeagent.tool.execution_manager import ToolExecutionManager
+from codeagent.tool.mcp.community import McpCommunityTool, McpContextTool
+from codeagent.tool.mcp.project_tool import McpProjectTool
 from codeagent.tool.normalizer import ToolResultNormalizer
 from codeagent.tool.registry import ToolRegistry
 from codeagent.workspace.context import WorkspaceContext
@@ -125,6 +131,17 @@ class AgentSession:
                 *default_tools(),
                 MemoryGetTool(self.memory_store, config.effective_project_id),
                 EvidenceGetTool(self.event_store),
+                *(McpProjectTool(name) for name in config.mcp.project_tools),
+                *(McpCommunityTool(server, grant) for server in config.mcp.servers
+                  for grant in server.grants),
+                *(McpContextTool(server, grant) for server in config.mcp.servers
+                  for grant in server.context_grants),
+                *(SkillResourceTool(skill.id, skill.package) for skill in config.skills.definitions
+                  if skill.package is not None
+                  and f'skill_{skill.id.replace("-", "_")}_resource' in skill.tools),
+                *(SkillScriptTool(skill) for skill in config.skills.definitions
+                  if skill.package is not None and skill.scripts
+                  and f'skill_{skill.id.replace("-", "_")}_script' in skill.tools),
             ]
         )
         approval = (
@@ -149,7 +166,12 @@ class AgentSession:
             context_profile=config.profile,
         )
         self.base_definition, self.skill_definitions = config.skills.compile(
-            self.definition, self.registry.names(),
+            replace(self.definition, non_replayable_tools=tuple(dict.fromkeys([
+                *self.definition.non_replayable_tools,
+                *(name for name in self.registry.names()
+                  if type(self.registry.get(name)) in (SkillScriptTool, McpCommunityTool)
+                  and self.registry.get(name).retry_policy is RetryPolicy.NEVER),
+            ]))), self.registry.names(),
         )
         self.definition = self.base_definition
         if config.skills.active is not None:

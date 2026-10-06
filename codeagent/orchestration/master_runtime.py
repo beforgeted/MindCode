@@ -290,6 +290,11 @@ class MasterRuntime:
                 return _with_deferred(recovered, records)
             master_run_id, task, graph = record.master_run_id, record.task, record.graph
             await self._reclaim_orphans(record, recovery_git)
+            if not self._scheduler.allows_automatic_replay(graph):
+                await self._run_store.update_run_status(master_run_id, 'failed')
+                return FinalResult(task=task, accepted=False, integrated=False,
+                                   master_run_id=master_run_id,
+                                   reason='当前能力含不可自动重放工具，未完成任务拒绝恢复重跑')
             # 关键：用**持久化的** original_base_sha，不用当前 HEAD（可能已被某次 promote 移动）。
             original_base = record.original_base_sha or (await git.base_revision() if git else None)
             attempt_offset = record.last_attempt.attempt_no if record.last_attempt else 0
@@ -412,6 +417,10 @@ class MasterRuntime:
                     master_run_id, attempt_no, AttemptState.DISCARDED, verdict="base_stale"
                 )
                 # BASE_STALE 走**独立**的 promote 重试预算，不吃语义 replan 预算。
+                if any(not w.run.definition.automatic_replay_allowed
+                       for w in result.workers.values()):
+                    reason = 'BASE_STALE：当前能力含不可自动重放工具，停止重跑'
+                    break
                 if promote_retries_left <= 0:
                     reason = "真实 base 被外部反复推进(BASE_STALE)，超出 promote 重试预算"
                     break
@@ -436,6 +445,8 @@ class MasterRuntime:
             await self._discard_attempt(candidate, result)
             if (verdict.indeterminate or any(w.verification.indeterminate
                                             for w in result.workers.values())
+                    or any(not w.run.definition.automatic_replay_allowed
+                           for w in result.workers.values())
                     or replans_left <= 0):
                 break
             replans_left -= 1

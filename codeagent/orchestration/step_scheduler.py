@@ -73,6 +73,13 @@ class StepScheduler:
         self._max_integrations = max(0, max_integrations)
         self._metrics = metrics or Metrics()
 
+    def allows_automatic_replay(self, graph: TaskGraph) -> bool:
+        try:
+            return all(self._registry.get(s.agent_id).automatic_replay_allowed
+                       for s in graph.steps)
+        except KeyError:
+            return False
+
     async def run(
         self,
         graph: TaskGraph,
@@ -139,7 +146,9 @@ class StepScheduler:
                             integrated_branches.append(outcome.branch)
                         await _notify(step_id, worker, True)
                         continue
-                    if outcome.stale and rerun_left.get(step_id, self._max_reruns) > 0:
+                    replay = worker.run.definition.automatic_replay_allowed
+                    if (outcome.stale and replay
+                            and rerun_left.get(step_id, self._max_reruns) > 0):
                         # 推测执行过期：丢弃过期 worktree,用**原指令**在最新基线重跑（Phase 2）
                         rerun_left[step_id] = rerun_left.get(step_id, self._max_reruns) - 1
                         self._metrics.incr("scheduler.reruns")
@@ -148,7 +157,8 @@ class StepScheduler:
                         completed.discard(step_id)
                         workers.pop(step_id, None)
                         continue
-                    if outcome.stale and integrator_left.get(step_id, self._max_integrations) > 0:
+                    if (outcome.stale and replay
+                            and integrator_left.get(step_id, self._max_integrations) > 0):
                         # 重跑耗尽仍过期 → Integrator 带冲突现场增强指令（Phase 3）。
                         augmented = await self._integrator.reconcile(
                             base_steps[step_id], conflict=outcome.conflict, overlap=outcome.overlap

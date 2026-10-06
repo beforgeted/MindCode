@@ -14,6 +14,7 @@ from codeagent.llm.pricing import CostConfig
 from codeagent.llm.routing import ModelRoutingConfig
 from codeagent.orchestration.verification_limits import VerificationLimits
 from codeagent.skills.config import SkillConfig
+from codeagent.tool.mcp.config import McpConfig
 from codeagent.workspace.project_identity import resolve_project_identity
 
 
@@ -62,6 +63,7 @@ class AppConfig:
     sandbox_limits: ExecutionLimits = field(default_factory=ExecutionLimits)
     downloads: DownloadPolicy = field(default_factory=DownloadPolicy)
     skills: SkillConfig = field(default_factory=SkillConfig)
+    mcp: McpConfig = field(default_factory=McpConfig)
 
     def __post_init__(self) -> None:
         if self.execution_backend not in ("local", "podman"):
@@ -115,6 +117,7 @@ class AppConfig:
             command_denylist=_env_patterns("CODEAGENT_CMD_DENY"),
             models=ModelRoutingConfig.from_env(),
             skills=SkillConfig.from_env(),
+            mcp=McpConfig.from_env(),
             costs=CostConfig.from_env(),
             capabilities=CapabilityConfig.from_env(),
             calibration=CalibrationConfig(

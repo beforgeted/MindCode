@@ -1,6 +1,6 @@
 # MindCode 系统架构
 
-本文描述基础 `main`（`16c669b`）与 `dev/skills` 的 Skill 一期结构；新能力已提交、未合入主线。MCP 保存在独立 `dev/mcp-tools` 分支。测试结果见[最新测试总览](testing/README.md)。
+本文描述基础 `main`（`16c669b`）与 `dev/agent-ecosystem` 的 Skill/MCP 生态结构；基础 Skill 检查点为 `2416a72`，社区接入改动尚未合入主线。测试结果见[最新测试总览](testing/README.md)。
 
 ## 模块与职责
 
@@ -8,7 +8,8 @@
 |---|---|---|
 | CLI / Session | 接收目标、组装配置和工具、管理会话与审批 | [cli](../codeagent/cli/)、[session.py](../codeagent/session.py) |
 | Agent / Runtime | Agent 配置、ReAct 循环、反思与局部验收 | [agent](../codeagent/agent/)、[runtime](../codeagent/runtime/) |
-| Skills | 显式加载声明式能力，编译受限 AgentDefinition，提供 Planner 目录与会话选择 | [skills](../codeagent/skills/)、[设计与用法](skills.md) |
+| Skills | 显式加载声明或标准包，冻结正文/资源，编译受限 AgentDefinition，提供 Planner 目录与会话选择 | [skills](../codeagent/skills/)、[设计与用法](skills.md) |
+| MCP | 操作者发现并固定服务目录，按本地授权注册工具，社区服务在当前容器调用 | [mcp](../codeagent/tool/mcp/)、[接入与边界](mcp-tools.md) |
 | Orchestration | 规划 DAG、调度、候选集成、全局验收与恢复 | [orchestration](../codeagent/orchestration/) |
 | Workspace / Execution | Git 与快照版本、容器、发布日志、下载和资源回收 | [workspace](../codeagent/workspace/)、[execution](../codeagent/execution/) |
 | LLM | Provider、角色路由、能力门禁、预算、计价与调用观测 | [llm](../codeagent/llm/) |
@@ -88,6 +89,10 @@ Git 工作区使用 worktree 与提交版本。干净根工作区可通过 CAS f
 
 Skill 是 Agent 的静态配置层，复用 AgentRegistry 和 Step.agent_id。它不创建新的调度器或恢复账本，也不共享 AgentRun 状态。工作方法描述怎么做，运行时工具交集决定可以做什么。
 
+社区接入增加了另一个问题：能解析一个 Markdown 文件，不代表完整 Skill 可以使用。当前以目录为包保留 scripts/references/assets 等配套，加载时冻结正文和文件内容；模型按需通过专用工具读配套文本。否则正文引用的相对文件可能缺失，或运行中被修改成另一版本。操作者另行授权 Python 入口文件与执行工具后，冻结包在当前容器 tmpfs 展开，镜像 Python 以隔离模式运行，候选数据仍在 `/workspace`。这避免磁盘更新、同名模块或模型参数替换启动源码；脚本依赖预置于镜像，内部代码仍可影响同一候选，因此保守标为可写且不自动重试。Harness 专有工具、非 Python 入口和跨 Skill 引用仍需适配。
+
+包的内容摘要用于固定输入，不能证明发布者可信或方法有效。操作者指定的工具集合与全局权限取交集；包内 allowed-tools 不能新增权限。正文较长时仍受原有上下文预算约束，不能通过安装 Skill 扩大模型窗口。
+
 ```mermaid
 flowchart LR
     A[操作者显式本地配置] --> B[冻结 Skill 定义]
@@ -102,3 +107,13 @@ flowchart LR
 核心问题是空集合的含义。旧 Agent 用空 tuple 表示不限工具，若直接拿它存储 Skill 的空交集，就会把“没有获得权限”变成“允许所有工具”。一期增加显式 tools_restricted 标记，并在模型请求和真实执行两个位置应用同一集合。模型返回未声明工具仍会得到拒绝结果，不会因为它声称需要该工具就执行。
 
 另外，未知能力不能继承默认 Agent 的更大权限。默认 Planner 可修复未知名称并有明确普通 Agent 回退；绕过 Planner 的自定义或恢复图仍在调度层检查，返回失败 Worker，保持失败到发布门禁的传播。权限正确与模型效果是两种证据：当前固定 Provider 验证前者，后续独立消融才评价后者。
+
+## MCP 的协议与权限为何分开
+
+MCP 解决客户端怎样初始化、发现和调用服务；它没有替 MindCode 决定工具是否获准、效果能否回滚或候选能否发布。服务自报 readOnlyHint 只是输入，不能当作操作者授权。当前先由操作者探测真实服务、固定 catalog 摘要和 Schema，再指定 effect/retry；执行前仍由 ToolExecutionManager 复核 Agent 权限。
+
+如果在宿主启动 Filesystem 服务，它看到的是宿主真实目录，即使 Worker 的其它工具在容器中，仍会出现隔离漏洞。因此社区 MCP 客户端与服务都进入当前 SandboxExecutor 的容器，读取 Worker 当前快照；配置的容器命令来自操作者，服务代码来自只读镜像。缺少容器实现时明确失败，不回落到宿主。
+
+每次调用独立会话，便于让超时、取消和异常退出有清晰的资源所有者，也避免多个 Worker 共享服务内存状态。代价是初始化开销、不能保留进程内 Memory 状态；Git 的主机管理目录不进入快照，临时仓库协议验收不能证明真实提交历史已可用。Resources/Prompts 分别按精确 URI、名称授权并固定目录契约；获取的文本和角色只作为工具结果数据，不能变成系统规则或新增工具权限。真实 Everything 的运行、内容越权与 Worker 发布判据记录在[工具与能力测试](testing/tools-and-skills.md)。
+
+非幂等社区能力还有重放问题：仅给工具标注 `retry=never`，若调度器仍重新运行整个 Worker，代码照样可能再执行。当前把不可重放的注册工具集合固定在 AgentDefinition 中，再按每个 Agent 的有效工具范围判断；含此能力时禁止反思、冲突重跑、全局重规划、BASE_STALE 重跑和未完成任务恢复重跑。判定保守到“授权但未调用”也停重放，代价是降低自动收敛机会；独立只读 Skill 保留原收敛流程。它不代替操作 ID、外部幂等协议或旧配置版本的精确重放。

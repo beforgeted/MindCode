@@ -1,18 +1,20 @@
 # 最新测试总览
 
-当前 `dev/skills` 从 `main` 的 `16c669b` 独立开发，已提交、未合入主线。最终 Skill 候选冻结 230 文件；清单 SHA256 `1f210f6c878f8487d8d7987ec3dfc12c29ab3827fbfbe4794f98fecf487a6581`。公开文档随后整理；218 个 Python/pyproject 文件清单 SHA256 `88c95542b4b569e6173394a2b88edfdb52844408d126ab07bb460f56ded912a9`，代码不变。
+当前 `dev/agent-ecosystem` 基于 Skill 检查点 `2416a72`，整合 MCP 基础与真实社区接入，尚未合入主线。最终候选冻结 251 文件，清单 SHA256 `a943eed48819d3ef8921759c0248440f1282e641dd371a630b1eec059702f57f`；238 个 Python/pyproject 文件清单 SHA256 `042dc3f2de17c6a68a301b6a785471e377cf3dd34d08d186ee88e5c71bdab769`。公开文档随后整理，代码摘要单独核对。
 
-截至 **2026-10-04**，最终候选 Windows 完整回归 **694 passed、161 skipped**，Ruff/Pyright 通过；独立 Ubuntu VM **854 passed、1 skipped**，包含 **38 个真实 Podman 用例**；两端 Ruff/Pyright 均通过，本轮付费模型调用 0。详见[工具与能力测试](tools-and-skills.md)。基础主线的历史完整验收源码为 [`0335117`](https://github.com/beforgeted/MindCode/commit/0335117abf967fde916b87fc490fff3ac2428f05)，以下历史数字不能替代本次新代码验收。
+截至 **2026-10-06**，最终候选 Windows **790 passed、189 skipped**；独立 Ubuntu VM **978 passed、1 skipped**，两端 Ruff/Pyright 通过，VM 包含 **64 个真实 Podman 用例**，付费模型调用 0。真实社区矩阵、判据和边界见[工具与能力测试](tools-and-skills.md)。基础主线历史完整验收源码为 [`0335117`](https://github.com/beforgeted/MindCode/commit/0335117abf967fde916b87fc490fff3ac2428f05)，以下历史数字不能替代本次新代码验收。
 本目录按主题维护当前结果，不追加每个开发阶段的流水；原始记录和个人现场留在本地忽略目录。
 
-## Skill 最终完整结果
+## MCP / Skill 生态最终完整结果
 
 | 环境 | 收集 | 通过 | 跳过 | 失败 / 错误 | 静态检查 |
 |---|---:|---:|---:|---:|---|
-| Windows | 855 | **694** | **161** | 0 / 0 | Ruff / Pyright 通过 |
-| 独立 Ubuntu VM | 855 | **854** | **1** | 0 / 0 | Ruff / Pyright 通过 |
+| Windows | 979 | **790** | **189** | 0 / 0 | Ruff / Pyright 通过 |
+| 独立 Ubuntu VM | 979 | **978** | **1** | 0 / 0 | Ruff / Pyright 通过 |
 
-VM Skill 专项 38 项（含 2 项真实容器）；全量真实 Podman 38 项（基础 36 + Skill 2），均已包含于 855 项。专项不可另加总。最终 26 文件 VM 归档摘要核对通过，SHA256 `e8c7baa79ca62c84e0dc99705e54cd095eb805a635a7c7c94db0cf1bf3f0620a`；原仓库与历史证据保持不变，容器全部清理，付费模型调用 0。实现通过不代表模型质量提升，后续自然任务对照需新的授权。
+149 个真实社区顶层/归档包全部通过当前加载器和官方参考验证器。Time、Filesystem、Everything、Git 为真实官方服务；固定 Provider 仅控制任务流程。专项包含在全量中，不能与完整回归另行相加；实现通过不代表模型质量提升，后续自然任务对照需新的授权。
+
+VM 生态专项83/83，含23项真实容器；全量64项真实容器包括基础36、Skill2、随附MCP3、社区10、可执行能力13。双平台代码与149包内容摘要一致，33份VM证据逐项核对，归档含清单共34文件，SHA256 `a084fd4a7448578e7334e86cbab3dcb8dd45f6a0e312234064ebdc08a894cc16`。原仓库与历史不变，容器已清理。最终979项包含真实脚本、Resources/Prompts接线及自动重放门禁；旧候选全量中断后保留，不能替代最终验收。
 
 ## 基础主线历史完整结果与统计口径
 
@@ -35,6 +37,7 @@ Windows 跳过项主要是 POSIX 与真实容器路径，不代表这些能力�
 |---|---|
 | [沙箱与恢复测试](sandbox-and-recovery.md) | 文件/命令隔离、下载、普通交互、候选发布、进程互斥、崩溃恢复与资源清理 |
 | [模型与上下文测试](model-and-context.md) | 路由、成本、能力、窗口、Map/Reduce、完整证据和校准 |
+| [工具与能力测试](tools-and-skills.md) | 标准 Skill 包、真实 MCP、配套资源、权限、服务进程与发布门禁 |
 | [真实模型场景使用](../../scenarios/README.md) | 显式启动场景、Planner 探针和 19 任务 benchmark |
 
 普通 pytest 的模型行为由固定 Provider/SDK 替身控制，验证预算、状态与门禁。
@@ -67,9 +70,10 @@ python -m pyright
 VALIDATION_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mindcode-validation.XXXXXX")"
 git clone --no-hardlinks /path/to/source/repo "$VALIDATION_ROOT/source"
 cd "$VALIDATION_ROOT/source"
-git checkout 0335117
+# 使用已提交的待验收版本；未提交候选需复制冻结源码，不能只克隆分支。
+git checkout <待验收commit>
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install -e '.[dev,ecosystem]'
 export MINDCODE_PODMAN_TEST_IMAGE='<已安装的完整 SHA256 镜像 ID>'
 .venv/bin/python -m pytest -q --basetemp "$VALIDATION_ROOT/pytest-tmp" --junitxml "$VALIDATION_ROOT/pytest.xml"
 .venv/bin/python -m ruff check .
@@ -87,7 +91,9 @@ podman ps -a --format json
 
 | 本地证据 | 用途 |
 |---|---|
-| `skills-verified/windows/`、`skills-verified/vm/` | 最终 855 项完整验收与 38 项 Skill 专项，冻结源码及归档核对 |
+| `ecosystem-runtime/` | 当前双平台、真实脚本/资源/Prompt/重放验收及固定来源/镜像记录 |
+| `agent-ecosystem/` | E1 社区结构/协议历史验收，前版失败与通过现场均保留 |
+| `skills-verified/` | Skill 基础检查点的历史完整验收，不能替代当前生态版本 |
 | `windows-calibration-full.xml` 与对应日志 | Windows 817 个收集用例及静态结果 |
 | `vm-calibration/vm-full.xml`、`vm-unit.xml` 与日志 | VM 全量与 211 项专项 |
 | `vm-calibration/calibration-summary.json` | 汇总结果与真容器分类 |
@@ -97,4 +103,4 @@ podman ps -a --format json
 后续改变源码时，更新验收版本、对应环境结果和本次失败修复；不要用旧全量结果覆盖新版本。
 源码未变的文档调整只做文档检查，明确说明未重跑测试。失败、跳过、模拟与真实执行必须分别说明。
 
-Skill 一期独立验收已完成，已提交、未合入主线；下一项为 Knowledge 只读项目索引与查询。真实模型效果对照另行安排并取得新的数据与额度授权；既有校准消融留在实验分支。
+MCP/Skill 社区生态下一阶段优先服务生命周期、Memory 跨调用状态与隔离，再接 Fetch 受控网络；Knowledge 顺延。真实模型效果对照另行安排并取得新的数据与额度授权；既有校准消融留在实验分支。

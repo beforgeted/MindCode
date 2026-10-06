@@ -107,7 +107,13 @@ a→b→c 不误报）。`python -m scenarios.planner_probe --samples 5`。
 
 
 
-## 沙箱运行与测试结果
+## 无模型费用的社区兼容矩阵
+
+新增 `python -m scenarios.ecosystem_compatibility`，读取已固定的真实社区源码与已安装官方 MCP，生成包清单、目录和测试 fixture；不联网安装、不修改源包、不运行社区 Skill 脚本、不调用模型。准备输出目录必须尚不存在，避免覆盖历史。
+
+具体版本、Time → Filesystem → Everything → Git 的判据、开关与复现命令见[工具与能力测试](../docs/testing/tools-and-skills.md)。`tests/test_ecosystem.py` 用于 Windows/VM 的加载与协议探测；`tests/test_ecosystem_podman.py` 只在独立 VM 验证运行调用及发布门禁。模拟 Provider 仅控制任务流程，MCP 服务与容器是真实实现。
+
+## 沙箱运行约束
 
 项目规定Linux测试只在独立Ubuntu VM运行，禁止使用WSL Ubuntu。运行模型前应显式设置
 CODEAGENT_EXECUTION_BACKEND=podman、CODEAGENT_SANDBOX_IMAGE为已安装的完整SHA256 ID；
