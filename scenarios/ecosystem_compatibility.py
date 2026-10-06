@@ -64,6 +64,14 @@ async def prepare(args) -> None:
                 'tool': 'git_status', 'arguments': {'repo_path': '{workspace}'},
                 'expected': 'On branch'},
     }
+    if args.memory_node_root is not None:
+        memory_root = args.memory_node_root.resolve() / 'node_modules/@modelcontextprotocol'
+        servers['memory'] = {
+            'command': [node, str(memory_root / 'server-memory/dist/index.js')],
+            'container_command': ['node', '/opt/mcp-memory/node_modules/'
+                                  '@modelcontextprotocol/server-memory/dist/index.js'],
+            'tool': 'read_graph', 'arguments': {}, 'expected': 'entities',
+        }
     ctx = ToolExecutionContext(
         agent_run_id='operator', session_id='matrix', tool_run_id='discovery', call_id='discovery',
         workspace=WorkspaceContext.local(output), cancellation=CancellationToken(),
@@ -82,6 +90,9 @@ async def prepare(args) -> None:
     for name in ('filesystem', 'everything'):
         raw = await asyncio.to_thread((node_root / ('server-' + name) / 'package.json').read_text)
         versions['@modelcontextprotocol/server-' + name] = json.loads(raw)['version']
+    if args.memory_node_root is not None:
+        raw = await asyncio.to_thread((memory_root / 'server-memory/package.json').read_text)
+        versions['@modelcontextprotocol/server-memory'] = json.loads(raw)['version']
     await asyncio.to_thread((output / 'fixture.json').write_text,
                             json.dumps(fixture, indent=2), encoding='utf-8')
     await asyncio.to_thread((output / 'skill-census.json').write_text,
@@ -98,6 +109,7 @@ def main() -> None:
     parser.add_argument('--sources', type=Path, required=True)
     parser.add_argument('--node', type=Path, required=True)
     parser.add_argument('--node-root', type=Path, required=True)
+    parser.add_argument('--memory-node-root', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     asyncio.run(prepare(parser.parse_args()))
 

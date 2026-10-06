@@ -8,12 +8,37 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import Any
 
 MAX_BYTES = 5 * 1024 * 1024
+MAX_MEMORY_BYTES = 1024 * 1024
+
+
+def check_memory_path(path: Path) -> None:
+    """State is a regular bounded candidate file, never a runtime or host path."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_MEMORY_BYTES:
+        raise ValueError('workspace memory must be a regular file within its byte limit')
+
+
+def workspace_memory_path(server_id: str, root: Path = Path('/workspace')) -> Path:
+    if not isinstance(server_id, str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,23}', server_id):
+        raise ValueError('invalid workspace memory owner')
+    for directory in (root, root / 'mcp-state', root / 'mcp-state' / server_id):
+        directory.mkdir(exist_ok=True)
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise ValueError('workspace memory directory must not be a link')
+    path = root / 'mcp-state' / server_id / 'memory.jsonl'
+    check_memory_path(path)
+    return path
 
 
 def runtime_command(argv: list[str]) -> tuple[list[str], dict[str, str]]:
@@ -36,7 +61,8 @@ def runtime_command(argv: list[str]) -> tuple[list[str], dict[str, str]]:
         if writable(target) and (not target.is_dir() or (i == 1 and interpreter)):
             raise ValueError('mutable runtime startup file is unsupported')
     env = {k: v for k, v in os.environ.items()
-           if k not in {'PYTHONPATH', 'PYTHONHOME', 'NODE_PATH', 'NODE_OPTIONS'}}
+           if k not in {'PYTHONPATH', 'PYTHONHOME', 'NODE_PATH', 'NODE_OPTIONS',
+                        'MEMORY_FILE_PATH'}}
     return [str(executable_path), *argv[1:]], env
 
 
@@ -120,6 +146,12 @@ async def exchange(payload: dict[str, Any]) -> dict:
         argv, env = runtime_command(argv)
     else:
         env = dict(os.environ)
+    memory_path = None
+    if 'workspace_memory' in payload:
+        if not runtime:
+            raise ValueError('workspace memory requires the runtime domain')
+        memory_path = workspace_memory_path(payload['workspace_memory'])
+        env['MEMORY_FILE_PATH'] = str(memory_path)
     params = StdioServerParameters(command=argv[0], args=argv[1:], env=env,
                                   cwd='/' if runtime else None)
     async with stdio_client(params, errlog=sys.stderr) as (read, write):
@@ -204,6 +236,8 @@ async def exchange(payload: dict[str, Any]) -> dict:
             if (len(matches) != 1 or matches[0]['inputSchema'] != descriptor['inputSchema']):
                 raise ValueError('authorized tool schema changed')
             result = await session.call_tool(descriptor['name'], payload['arguments'])
+            if memory_path is not None:
+                check_memory_path(memory_path)
             data = result.model_dump(mode='json', exclude_none=True)
             if any(c.get('type') != 'text' for c in data.get('content', [])):
                 raise ValueError('non-text MCP content is unsupported by runtime tools')

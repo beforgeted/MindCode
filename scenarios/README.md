@@ -113,6 +113,8 @@ a→b→c 不误报）。`python -m scenarios.planner_probe --samples 5`。
 
 具体版本、Time → Filesystem → Everything → Git 的判据、开关与复现命令见[工具与能力测试](../docs/testing/tools-and-skills.md)。`tests/test_ecosystem.py` 用于 Windows/VM 的加载与协议探测；`tests/test_ecosystem_podman.py` 只在独立 VM 验证运行调用及发布门禁。模拟 Provider 仅控制任务流程，MCP 服务与容器是真实实现。
 
+另准备固定官方 Memory npm 安装前缀时，可以传入 `--memory-node-root <Memory安装前缀>`；省略该参数仍只发现原来的四个服务。对应 `tests/test_mcp_memory.py` 和 `tests/test_mcp_memory_podman.py` 分别检查配置/状态文件边界与真实跨调用、Worker 隔离、失败回收、发布门禁。运行时镜像必须另含相同 Memory 分发包；发现不会调用写工具或打开运行授权。
+
 ## 沙箱运行约束
 
 项目规定Linux测试只在独立Ubuntu VM运行，禁止使用WSL Ubuntu。运行模型前应显式设置

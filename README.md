@@ -14,7 +14,7 @@ Python 实现的编码 Agent，支持上下文压缩、证据与长期记忆、�
 - **社区生态（功能分支）**：加载标准 `SKILL.md` 包、读取冻结配套并显式授权 Python 脚本；社区 stdio MCP 的工具、固定资源和 Prompt 在现有 Podman 域调用，内容不扩大工具权限。
 
 P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准一期已实现并合入 `main`。
-当前 `dev/agent-ecosystem` 基于 Skill 检查点 `2416a72`，整合 MCP 一期 `1b8323a`，补齐真实社区兼容、脚本执行及 Resources/Prompts 运行授权；E1/E2 保存在当前功能分支，尚未合入主线。下一阶段处理 MCP 服务状态与受控网络，Knowledge 和模型效果评测顺延；上下文实验保存在 `codex/context-optimization-preview`。
+当前 `dev/agent-ecosystem` 基于 Skill 检查点 `2416a72`，整合 MCP 一期 `1b8323a`；E1/E2 已提交 `8cfa764`，本轮提交官方 Memory 的候选文件状态、Worker 隔离和异常回收，尚未合入主线。下一项为 Fetch 受控网络，Knowledge 和模型效果评测顺延；上下文实验保存在 `codex/context-optimization-preview`。
 
 ## 文档
 
@@ -33,7 +33,7 @@ P0–P9 主线、O1 观测、R1 角色/成本/窗口适配及 E10 保守校准�
 | [模型与上下文测试](docs/testing/model-and-context.md) | 模型路由、费用、窗口、压缩、验收与校准的统一判据 |
 | [真实模型场景与 benchmark 使用](scenarios/README.md) | 显式启用的真实模型测试入口和任务判据 |
 
-截至 **2026-10-06**，社区生态最终候选 Windows 完整回归 **790 passed、189 skipped**；独立 Ubuntu VM **978 passed、1 skipped**，包含 **64 个真实 Podman 用例**，两端 Ruff/Pyright 通过，付费模型调用 0。149 个社区包已通过当前加载器和官方参考；完整结果与未支持能力见[工具与能力测试](docs/testing/tools-and-skills.md)。
+截至 **2026-10-06**，当前生态候选 Windows 完整回归 **805 passed、202 skipped**；独立 Ubuntu VM **1006 passed、1 skipped**，包含 **75 个真实 Podman 用例**，两端 Ruff/Pyright 通过，付费模型调用 0。VM 的 149 个社区包完整匹配固定输入；Windows 148 个完整匹配、1 个包缺脚本，不能算该包完整验收。完整结果与边界见[工具与能力测试](docs/testing/tools-and-skills.md)。
 
 基础主线代码提交 `0335117` 的历史完整验收：
 

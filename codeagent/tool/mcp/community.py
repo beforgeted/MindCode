@@ -58,8 +58,14 @@ class McpServer:
     container_command: tuple[str, ...]
     grants: tuple[McpGrant, ...]
     context_grants: tuple[McpContextGrant, ...] = ()
+    workspace_memory: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.workspace_memory) is not bool:
+            raise ValueError('workspace_memory must be an explicit boolean')
+        if self.workspace_memory and any(g.effect is EffectKind.WORKSPACE_WRITE
+                                         and g.retry is not RetryPolicy.NEVER for g in self.grants):
+            raise ValueError('workspace memory mutations require retry=never')
         if not isinstance(self.id, str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,23}', self.id):
             raise ValueError('MCP server id must be lowercase ASCII, at most 24 characters')
         for argv in (self.command, self.container_command):
@@ -74,6 +80,30 @@ class McpServer:
                 or any(not isinstance(g, McpContextGrant) for g in self.context_grants)
                 or len({(g.kind, g.key) for g in self.context_grants}) != len(self.context_grants)):
             raise ValueError('MCP context grants require at most 64 unique resources/prompts')
+
+
+async def _runtime_exchange(executor: SandboxExecutor, ctx: ToolExecutionContext,
+                            server: McpServer, source: str, payload: dict) -> dict:
+    """The current domain owns state; uncertain outcomes cannot produce a candidate."""
+    if server.workspace_memory:
+        payload['workspace_memory'] = server.id
+    try:
+        async with asyncio.timeout(ctx.timeout_seconds):
+            output = await executor.manager.execute_python(
+                executor.handle, source, json.dumps(payload).encode(),
+                cancellation=ctx.cancellation, max_output_bytes=community_bridge.MAX_BYTES,
+            )
+        data = bridge.load_json(output.stdout)
+        if output.returncode:
+            data.setdefault('bridge_error', 'ProtocolError')
+        if output.returncode or 'bridge_error' in data or data.get('isError'):
+            if server.workspace_memory:
+                await executor.manager.close(executor.handle)
+        return data
+    except BaseException:
+        if server.workspace_memory:
+            await asyncio.shield(executor.manager.close(executor.handle))
+        raise
 
 
 class McpCommunityTool(BaseTool):
@@ -105,7 +135,7 @@ class McpCommunityTool(BaseTool):
         if not isinstance(executor, SandboxExecutor) or ctx.workspace.root != executor.root:
             return ToolResult.error(call, 'community MCP runtime requires its Podman domain')
         ctx.cancellation.raise_if_cancelled()
-        payload = json.dumps({
+        payload = {
             'action': 'call', 'runtime': True,
             'descriptor': json.loads(self.grant.descriptor_json),
             'arguments': arguments,
@@ -113,16 +143,11 @@ class McpCommunityTool(BaseTool):
                         for a in self.server.container_command],
             'timeout_seconds': ctx.timeout_seconds,
             'max_response_bytes': min(ctx.max_output_bytes, 1024 * 1024),
-        }).encode()
+        }
         # The controller deadline also covers synchronous schema work in the helper.
         # Cancelling the Podman operation destroys its execution domain and descendants.
-        async with asyncio.timeout(ctx.timeout_seconds):
-            output = await executor.manager.execute_python(
-                executor.handle, self._source, payload, cancellation=ctx.cancellation,
-                max_output_bytes=community_bridge.MAX_BYTES,
-            )
-        data = bridge.load_json(output.stdout)
-        if output.returncode or 'bridge_error' in data:
+        data = await _runtime_exchange(executor, ctx, self.server, self._source, payload)
+        if 'bridge_error' in data:
             if data.get('bridge_error') == 'TimeoutError':
                 raise TimeoutError('MCP request deadline')
             return ToolResult.error(call, 'MCP service failed: '
@@ -161,21 +186,16 @@ class McpContextTool(BaseTool):
         if not isinstance(executor, SandboxExecutor) or ctx.workspace.root != executor.root:
             return ToolResult.error(call, 'MCP context runtime requires its Podman domain')
         ctx.cancellation.raise_if_cancelled()
-        payload = json.dumps({
+        payload = {
             'action': self.grant.kind, 'key': self.grant.key, 'runtime': True,
             'descriptor': json.loads(self.grant.descriptor_json), 'arguments': arguments,
             'command': [a.replace('{workspace}', '/workspace')
                         for a in self.server.container_command],
             'timeout_seconds': ctx.timeout_seconds,
             'max_response_bytes': min(ctx.max_output_bytes, 1024 * 1024),
-        }).encode()
-        async with asyncio.timeout(ctx.timeout_seconds):
-            output = await executor.manager.execute_python(
-                executor.handle, self._source, payload, cancellation=ctx.cancellation,
-                max_output_bytes=community_bridge.MAX_BYTES,
-            )
-        data = bridge.load_json(output.stdout)
-        if output.returncode or 'bridge_error' in data:
+        }
+        data = await _runtime_exchange(executor, ctx, self.server, self._source, payload)
+        if 'bridge_error' in data:
             if data.get('bridge_error') == 'TimeoutError':
                 raise TimeoutError('MCP context deadline')
             return ToolResult.error(call, 'MCP context failed: '

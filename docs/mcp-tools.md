@@ -4,7 +4,7 @@
 
 ## 社区服务怎么接入
 
-安装 `.[ecosystem]`，由操作者选择并安装固定版本的服务器。当前实际验证的是官方 Time、Filesystem、Everything、Git；Python/npm 依赖和服务器程序必须同时准备在宿主探测环境及可信容器镜像内。调用时不会自动运行 npx 下载或安装钩子。
+安装 `.[ecosystem]`，由操作者选择并安装固定版本的服务器。当前兼容矩阵包含官方 Time、Filesystem、Everything、Git，以及文件持久化的 Memory；Python/npm 依赖和服务器程序必须同时准备在宿主探测环境及可信容器镜像内。调用时不会自动运行 npx 下载或安装钩子。
 
 发现是独立的操作者入口，可以在 Windows 或独立 Ubuntu VM 执行；下面只探测 Time 的目录，不调用模型：
 
@@ -63,7 +63,34 @@ v2 服务配置可另加 `resources` 和 `prompts` 白名单，旧配置省略�
 
 仅接收精确 URI 的文本资源，以及 user/assistant 角色的文本 Prompt 消息；二进制、图片或超限输出显式失败。结果序列化进普通 `ToolResult`，保留原角色作为数据，不拼接到系统提示词、不自动执行其中指令、不跟随链接再取资源。恶意文字仍可能影响回答，但伪造的工具调用继续接受运行时权限复核。此处的 `read_only` 是调用分类，仍不代表任意服务器代码的候选文件被只读挂载。
 
-## 调用为什么仍在原有隔离链路内
+## 官方 Memory：状态跟随候选工作区
+
+官方 [`@modelcontextprotocol/server-memory`](https://www.npmjs.com/package/@modelcontextprotocol/server-memory) 使用 JSONL 文件保存实体、关系和观察。当前固定验收版本为 `2026.8.31`，通过环境变量 `MEMORY_FILE_PATH` 选择文件；实测 npm 分发包与参考仓库提交分别锁定，不能声称来自同一次构建。
+
+在已固定目录的 Memory 服务条目中显式开启：
+
+```json
+{
+  "workspace_memory": true,
+  "tools": {
+    "create_entities": {"effect": "workspace_write", "retry": "never"},
+    "add_observations": {"effect": "workspace_write", "retry": "never"},
+    "read_graph": {"effect": "read_only", "retry": "safe"}
+  }
+}
+```
+
+这段仍需服务 id、宿主/容器 command、catalog 和摘要。宿主发现只初始化和列目录，不调用写工具；容器命令必须指向受信镜像内安装的真实 Memory 入口。默认关闭，模型不能开启该选项或修改状态路径。
+
+桥接仅为此选项设置 `MEMORY_FILE_PATH=/workspace/mcp-state/<服务id>/memory.jsonl`，没有任意环境变量、凭据或宿主存储路径传递入口。父目录必须是普通目录，已有状态必须是普通文件且不超过 1MiB；链接、损坏状态、超限和服务异常均有明确失败结果。每个服务 id 对应独立文件，两个 Worker 在各自容器中读写各自快照。同一 Worker 的 Podman 域锁串行化全部执行操作，避免多个短会话并发执行读改写而丢失更新。
+
+每次调用仍启动并关闭自己的服务，跨调用依靠候选文件保留状态。该文件跟随封存快照、独立验收和原有事务发布；验收失败不会写入真实项目。后续 Worker 可以继承已经发布的 base 状态，“隔离”表示运行中的可变状态互不共享，不能解释成永久隔绝项目的已发布记忆。并行 Worker 修改同一 base 状态文件时仍可能产生集成冲突，不支持知识图谱的语义合并。
+
+开启此选项的写工具必须 `retry=never`。任何调用失败、协议/响应异常、超时或取消都会关闭整个当前候选域，包括只读调用失败；响应超限可能发生在服务已写文件之后，因此不能保留候选继续发布。该规则偏保守，不会自动重放结果不确定的写操作；显式新任务及当前模型重复调用仍不是 exactly-once。
+
+这里的 JSONL 图谱属于项目候选产物，可能随项目变更发布；MindCode 自带 SQLite `memory.db` 属于另一套长期记忆能力，不与该图谱自动同步。它们也不能代替尚待实现的项目 Knowledge 索引。没有加入长期服务缓存、后台重连、外部数据库或跨 Worker 全局可变会话。
+
+## 调用与隔离链路
 
 ```mermaid
 flowchart TD
@@ -94,14 +121,15 @@ effect 是操作者对调度/重试的分类，`read_only` 不会使 `/workspace
 
 | 能力 | 当前范围 |
 |---|---|
-| stdio initialize / tools/list / tools/call | 四个真实官方服务，实际参数校验、文本和 structuredContent |
+| stdio initialize / tools/list / tools/call | 五个真实官方服务，实际参数校验、文本和 structuredContent |
 | 分页目录 | 客户端支持最多 16 页、256 项，循环 cursor 拒绝；是否在真实样本中触发分页单独记录 |
 | Resources / Prompts | 操作者精确白名单、目录固定、Podman 内运行；文本以普通 ToolResult 返回；Everything 真实读/取 |
 | resourceTemplates | 操作者发现；尚未提供模板参数展开或动态 URI 授权 |
 | 图片、音频、resource_link / 嵌入资源工具结果 | 暂不支持，显式失败；文本之外不能静默丢弃 |
 | sampling / elicitation / roots / tasks / 订阅 | 未向服务器提供这些 Agent 能力，不调用模型处理回调；未声称完整协议兼容 |
 | 远程 HTTP、OAuth、外部数据库或发布 | 未支持；没有凭据环境变量传递入口 |
-| 长期有状态服务 | 每次调用独立会话；当前没有跨调用进程状态或服务重连重放 |
+| 文件持久化状态 | 显式开启 workspace_memory；候选 JSONL、域内串行、Worker 隔离与验收发布门禁 |
+| 长期进程状态 | 每次调用独立会话；没有长期进程缓存或服务重连重放 |
 | Git 原仓库历史 | 主机 `.git` 不进入快照；验收使用容器临时仓库，不能据此声称 Worker 已可读取主机提交历史 |
 
 协议由固定 SDK 1.x 协商，当前可选依赖要求 `mcp>=1.30,<2`。实现边界参考 [stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)与[工具规范](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)。Everything 的工具通过不等于全部 MCP 能力通过。

@@ -62,7 +62,7 @@ class McpConfig:
         for item in data['servers']:
             fields = {'id', 'command', 'container_command', 'catalog', 'catalog_sha256', 'tools'}
             if (not isinstance(item, dict) or not fields <= set(item)
-                    or set(item) - fields - {'resources', 'prompts'}
+                    or set(item) - fields - {'resources', 'prompts', 'workspace_memory'}
                     or not isinstance(item['catalog'], str) or not isinstance(item['tools'], dict)
                     or len(item['tools']) > 64
                     or not isinstance(item['command'], list)
@@ -106,5 +106,5 @@ class McpConfig:
                     context_grants.append(McpContextGrant(kind, name, json.dumps(matches[0])))
             servers.append(McpServer(item['id'], tuple(item['command']),
                                      tuple(item['container_command']), tuple(grants),
-                                     tuple(context_grants)))
+                                     tuple(context_grants), item.get('workspace_memory', False)))
         return cls(tuple(data.get('project_tools', [])), tuple(servers))
